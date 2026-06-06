@@ -1056,10 +1056,10 @@ _HTML_TEMPLATE = """\
     oninput="applyFilters()">
   <div style="display:flex;flex-direction:column;gap:2px;">
     <label style="font-size:.78rem;color:var(--muted);">Categories
-      <span style="font-weight:normal;">(Ctrl/⌘+click for multi-select):</span>
+      <span style="font-weight:normal;">(Ctrl/⌘+click, AND logic):</span>
     </label>
     <select id="filter-cat" multiple size="5" onchange="applyFilters()"
-      title="Select one or more categories; nothing selected = all. OR logic: shows PRs matching any selected category.">
+      title="Select one or more categories; nothing selected = all. AND logic: shows PRs matching ALL selected categories.">
       {cat_options}
     </select>
     <button onclick="document.getElementById('filter-cat').selectedIndex=-1;applyFilters()"
@@ -1198,7 +1198,7 @@ function applyFilters() {{
       p.title.toLowerCase().includes(txt) ||
       p.author.toLowerCase().includes(txt)
     )) return false;
-    if (selectedCats.length > 0 && !selectedCats.some(c => p.categories.includes(c))) return false;
+    if (selectedCats.length > 0 && !selectedCats.every(c => p.categories.includes(c))) return false;
     if (ci  && p.ci !== ci) return false;
     if (areas === "4+" && p.num_non_meta_areas < 4) return false;
     if (areas && areas !== "4+" && p.num_non_meta_areas !== +areas) return false;
@@ -2473,7 +2473,22 @@ def main():
         if cached_entry is not None and cached_entry.get("updated_at") == pr_updated_iso:
             if args.verbose:
                 print(f"  PR #{pr.number}: cache hit", flush=True)
-            pr_data_list.append(cached_entry["data"])
+            data = cached_entry["data"]
+            # Backfill CAT_STALE for entries cached before this category was
+            # added: the labels are stored in the cache so we can derive it
+            # without a fresh API call.
+            if (CAT_STALE not in data.get("categories", [])
+                    and any(lbl.lower() == "stale"
+                            for lbl in data.get("labels", []))):
+                data = dict(data)
+                data["categories"] = list(data["categories"]) + [CAT_STALE]
+                data["has_stale"] = True
+                if args.cache:
+                    pr_cache[cache_key] = {
+                        "updated_at": pr_updated_iso,
+                        "data": data,
+                    }
+            pr_data_list.append(data)
         else:
             try:
                 data = _analyze_pr(pr, maint_obj, verbose=args.verbose)
