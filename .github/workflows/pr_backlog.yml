@@ -76,11 +76,13 @@ jobs:
             --cache pr_backlog_cache.json
             --age "${{ inputs.age || '30' }}"
             --max-prs "${{ inputs.max_prs || '600' }}"
+            --exclude-drafts
             --verbose
           )
-          if [[ "${{ inputs.exclude_drafts }}" == "true" ]]; then
-            ARGS+=(--exclude-drafts)
-          fi
+          # exclude drafts for now.
+          #if [[ "${{ inputs.exclude_drafts }}" == "true" ]]; then
+          #  ARGS+=(--exclude-drafts)
+          #fi
           python3 scripts/analyze_pr_backlog.py "${ARGS[@]}"
 
       - name: Upload HTML report
