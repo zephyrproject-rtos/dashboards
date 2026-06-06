@@ -182,10 +182,10 @@ jobs:
 
           PUBLISH_BUCKET="testing.zephyrproject.org"
           PUBLISH_DOMAIN="testing.zephyrproject.io"
-          PUBLISH_ROOT="dashboards/licences/"
+          PUBLISH_ROOT="dashboards/licences"
 
           PUBLISH_UPLOAD_URI="s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/"
           PUBLISH_DOWNLOAD_URI="https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html"
 
-          aws s3 sync --quiet reports/ ${PUBLISH_UPLOAD_URI}
+          aws s3 sync reports/ ${PUBLISH_UPLOAD_URI}
           echo "Report is available at: ${PUBLISH_DOWNLOAD_URI}" >> ${GITHUB_STEP_SUMMARY}
