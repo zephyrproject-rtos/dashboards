@@ -1,0 +1,117 @@
+name: Maintainers Report
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Every day at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      activity:
+        description: 'GitHub activity query scope'
+        required: false
+        default: 'maintainers'
+        type: choice
+        options:
+          - none
+          - maintainers
+          - all
+      inactive_days:
+        description: 'Days without activity before considered inactive'
+        required: false
+        default: '365'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  maintainers-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Zephyr
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: zephyrproject-rtos/zephyr
+          path: zephyr
+          fetch-depth: 1
+
+      # Script resolves REPO_ROOT as parent.parent.parent of scripts/maintainers_report.py,
+      # so dashboards must be checked out inside the zephyr tree at zephyr/dashboards/.
+      - name: Checkout Dashboard scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: zephyr/dashboards
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --user PyYAML awscli==1.45.11
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore history from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_ROOT="dashboards/maintainers"
+
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/maintainers_history.json" \
+            "$GITHUB_WORKSPACE/maintainers_history.json" \
+            || echo "No history found in S3, starting fresh."
+
+      - name: Run maintainers report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: zephyr/dashboards
+        run: |
+          ARGS=(
+            --output "$GITHUB_WORKSPACE/maintainers_report.html"
+            --history "$GITHUB_WORKSPACE/maintainers_history.json"
+            --inactive-days "${{ inputs.inactive_days || '365' }}"
+            --retry
+          )
+          ACTIVITY="${{ inputs.activity || 'maintainers' }}"
+          if [[ "$ACTIVITY" == "maintainers" ]]; then
+            ARGS+=(--activity-maintainers)
+          elif [[ "$ACTIVITY" == "all" ]]; then
+            ARGS+=(--activity-all)
+          fi
+          python3 scripts/maintainers_report.py "${ARGS[@]}"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maintainers-report
+          path: maintainers_report.html
+
+      - name: Upload history
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maintainers-history
+          path: maintainers_history.json
+          if-no-files-found: ignore
+
+      - name: Publish to AWS S3
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/maintainers"
+
+          aws s3 cp "$GITHUB_WORKSPACE/maintainers_report.html" \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          aws s3 cp "$GITHUB_WORKSPACE/maintainers_history.json" \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/maintainers_history.json" || true
+          echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
+            >> "${GITHUB_STEP_SUMMARY}"
