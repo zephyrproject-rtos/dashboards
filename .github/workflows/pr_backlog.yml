@@ -112,9 +112,7 @@ jobs:
           PUBLISH_ROOT="dashboards/pr-backlog"
 
           aws s3 cp pr_backlog.html \
-            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html" \
-            --cache-control "no-cache, max-age=0, must-revalidate" \
-            --content-type "text/html"
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
           aws s3 cp pr_backlog_history.json \
             "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/pr_backlog_history.json" || true
           aws s3 cp pr_backlog_cache.json \
