@@ -1,0 +1,167 @@
+name: FOSSology Zephyr Modules
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: Checkout Zephyr
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: zephyrproject-rtos/zephyr
+          path: workspace/zephyr
+          fetch-depth: 1
+
+      - name: Install west
+        run: |
+          python3 -m pip install --user west
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize west workspace
+        working-directory: workspace
+        run: |
+          west init -l zephyr
+
+      - name: Generate west project matrix
+        id: matrix
+        working-directory: workspace
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          out = subprocess.check_output(
+              ["west", "list", "-f", "{name}\t{path}"],
+              text=True,
+          )
+
+          include = []
+          for line in out.splitlines():
+              name, path = line.split("\t", 1)
+
+              include.append({
+                  "name": name,
+                  "path": path,
+              })
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+          PY
+
+  fossology-module-scan:
+    needs: generate-matrix
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout Zephyr
+        uses: actions/checkout@v4
+        with:
+          path: workspace/zephyr
+          fetch-depth: 1
+
+      - name: Install west
+        run: |
+          python3 -m pip install --user west
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize west workspace
+        working-directory: workspace
+        run: |
+          west init -l zephyr
+
+      - name: Fetch only selected west project
+        working-directory: workspace
+        run: |
+          west update "${{ matrix.name }}"
+
+      - name: Prepare scan tree
+        run: |
+          mkdir scan-root
+          rsync -a "workspace/${{ matrix.path }}/" "scan-root/" \
+            --exclude='.git' \
+            --exclude='**/.git' \
+            --exclude='build' \
+            --exclude='**/build' \
+            --exclude='__pycache__' \
+            --exclude='**/__pycache__'
+
+      - name: FOSSology scan ${{ matrix.name }}
+        uses: fossology/fossology-action@v1
+        with:
+          scan_mode: scan-dir
+          scan_dir: scan-root
+          github_repository: ${{ matrix.name }}
+          github_repo_url: git://github.com/zephyrproject-rtos/${{ matrix.name }}.git
+          scanners: "nomos ojo copyright keyword"
+          report_format: SPDX_JSON
+
+      - name: Upload result
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossology-${{ matrix.name }}
+          path: results/
+
+  analyze-reports:
+    needs: fossology-module-scan
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Checkout Zephyr
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: workspace/zephyr
+          fetch-depth: 1
+
+      - name: Download all FOSSology artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fossology-*
+          path: artifacts/
+
+      - name: Generate per-module HTML and JSON reports
+        run: |
+          mkdir -p reports
+          for artifact_dir in artifacts/fossology-*/; do
+            module=$(basename "$artifact_dir" | sed 's/^fossology-//')
+            mkdir -p "reports/${module}"
+            python3 workspace/zephyr/scripts/foss_report.py \
+              --spdx-dir "${artifact_dir}" \
+              --html "reports/${module}/report.html" \
+              --json "reports/${module}/summary.json" \
+              --no-text \
+              || echo "WARNING: report generation failed for ${module}"
+          done
+
+      - name: Generate index page
+        run: |
+          python3 workspace/zephyr/scripts/foss_index.py \
+            --reports-dir reports
+
+      - name: Upload combined reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: foss-combined-reports
+          path: reports/
