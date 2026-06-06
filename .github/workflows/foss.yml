@@ -35,6 +35,8 @@ jobs:
         working-directory: workspace
         run: |
           west init -l zephyr
+          # temp
+          west config manifest.group-filter -- -hal
 
       - name: Generate west project matrix
         id: matrix
@@ -69,7 +71,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 10
       matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
 
     steps:
@@ -175,6 +177,8 @@ jobs:
 
       - name: Upload to AWS S3
         run: |
+
+          pip3 install awscli==1.45.11
 
           PUBLISH_BUCKET="testing.zephyrproject.org"
           PUBLISH_DOMAIN="testing.zephyrproject.io"
