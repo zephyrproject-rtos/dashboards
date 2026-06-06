@@ -157,7 +157,7 @@ jobs:
       - name: Generate index page
         run: |
           python3 scripts/foss_index.py \
-            --reports-dir reports
+          --reports-dir reports
 
       - name: Upload combined reports
         if: always()
@@ -165,3 +165,23 @@ jobs:
         with:
           name: foss-combined-reports
           path: reports/
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          aws-access-key-id: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload to AWS S3
+        run: |
+
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/licences/
+
+          PUBLISH_UPLOAD_URI="s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/"
+          PUBLISH_DOWNLOAD_URI="https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html"
+
+          aws s3 sync --quiet reports/* ${PUBLISH_UPLOAD_URI}
+          echo "Report is available at: ${PUBLISH_DOWNLOAD_URI}" >> ${GITHUB_STEP_SUMMARY}
