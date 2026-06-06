@@ -59,6 +59,7 @@ import html
 import json
 import os
 import pathlib
+import re
 import sys
 import textwrap
 import time
@@ -410,13 +411,18 @@ def _ci_details(pr):
     except Exception:
         pass
 
-    # Deduplicate while preserving first-seen order
+    # Deduplicate while preserving first-seen order.
+    # Also drop individual twister-build.* jobs: they are already
+    # rolled up into "Check Twister Status / all jobs passed", so
+    # listing them separately just creates noise.
+    _TWISTER_BUILD_RE = re.compile(r'^twister-build', re.IGNORECASE)
     seen = set()
     unique_failing = []
     for name in failing:
         if name not in seen:
             seen.add(name)
-            unique_failing.append(name)
+            if not _TWISTER_BUILD_RE.match(name):
+                unique_failing.append(name)
 
     if not states:
         return "unknown", unique_failing
