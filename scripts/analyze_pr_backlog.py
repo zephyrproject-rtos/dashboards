@@ -109,6 +109,7 @@ CAT_NEEDS_REBASE = "needs_rebase"
 CAT_DNM = "dnm"
 CAT_ARCH_REVIEW = "arch_review"
 CAT_NO_ASSIGNEE_ENGAGEMENT = "no_assignee_engagement"
+CAT_STALE = "stale"
 
 CATEGORY_META = {
     CAT_NO_REVIEWER: {
@@ -259,6 +260,14 @@ CATEGORY_META = {
             "The PR has an assignee but that person has left no reviews, "
             "comments, labels, or reviewer requests — they have not "
             "interacted with the PR at all."
+        ),
+    },
+    CAT_STALE: {
+        "label": "Stale",
+        "color": "#bdc3c7",
+        "description": (
+            "The PR carries a Stale label, indicating it has had no "
+            "activity for an extended period and may be abandoned."
         ),
     },
 }
@@ -477,6 +486,7 @@ def _analyze_pr(pr, maint_obj, verbose=False):
     has_arch_review = any(
         lbl in ("Architecture Review", "TSC") for lbl in label_names
     )
+    has_stale = any(lbl.lower() == "stale" for lbl in label_names)
 
     # ---- Mergeability ----
     try:
@@ -642,6 +652,8 @@ def _analyze_pr(pr, maint_obj, verbose=False):
         categories.append(CAT_NEEDS_REBASE)
     if has_arch_review:
         categories.append(CAT_ARCH_REVIEW)
+    if has_stale:
+        categories.append(CAT_STALE)
 
     if two_approvals_met:
         categories.append(CAT_NEARLY_APPROVED)
@@ -740,6 +752,7 @@ def _analyze_pr(pr, maint_obj, verbose=False):
         "needs_rebase": needs_rebase,
         "has_dnm": has_dnm,
         "has_arch_review": has_arch_review,
+        "has_stale": has_stale,
         "categories": categories,
     }
 
@@ -835,6 +848,8 @@ _HTML_TEMPLATE = """\
     padding: 5px 10px; font-size: 0.82rem; width: 220px; }}
   .filters select {{ border: 1px solid var(--border); border-radius: 4px;
     padding: 5px 8px; font-size: 0.82rem; }}
+  .filters select[multiple] {{ height: auto; min-height: 80px;
+    max-height: 130px; padding: 3px 4px; }}
   .filters label {{ font-size: 0.82rem; color: var(--muted); }}
   table {{ width: 100%; border-collapse: collapse;
     background: var(--card); border-radius: 8px; overflow: hidden;
@@ -1033,10 +1048,18 @@ _HTML_TEMPLATE = """\
   <label>Filter:&nbsp;</label>
   <input id="filter-text" type="search" placeholder="PR #, title, author…"
     oninput="applyFilters()">
-  <select id="filter-cat" onchange="applyFilters()">
-    <option value="">All categories</option>
-    {cat_options}
-  </select>
+  <div style="display:flex;flex-direction:column;gap:2px;">
+    <label style="font-size:.78rem;color:var(--muted);">Categories
+      <span style="font-weight:normal;">(Ctrl/⌘+click for multi-select):</span>
+    </label>
+    <select id="filter-cat" multiple size="5" onchange="applyFilters()"
+      title="Select one or more categories; nothing selected = all. OR logic: shows PRs matching any selected category.">
+      {cat_options}
+    </select>
+    <button onclick="document.getElementById('filter-cat').selectedIndex=-1;applyFilters()"
+      style="font-size:.72rem;padding:2px 6px;cursor:pointer;border:1px solid var(--border);
+             border-radius:3px;background:var(--card);color:var(--muted);">Clear</button>
+  </div>
   <select id="filter-ci" onchange="applyFilters()">
     <option value="">All CI states</option>
     <option>pass</option><option>fail</option>
@@ -1155,7 +1178,9 @@ document.querySelectorAll("thead th[data-col]").forEach(th => {{
 /* ---- filtering + rendering ---- */
 function applyFilters() {{
   const txt      = document.getElementById("filter-text").value.toLowerCase();
-  const cat      = document.getElementById("filter-cat").value;
+  const selectedCats = Array.from(
+    document.getElementById("filter-cat").selectedOptions
+  ).map(o => o.value).filter(Boolean);
   const ci       = document.getElementById("filter-ci").value;
   const areas    = document.getElementById("filter-areas").value;
   const draft    = document.getElementById("filter-draft").value;
@@ -1167,7 +1192,7 @@ function applyFilters() {{
       p.title.toLowerCase().includes(txt) ||
       p.author.toLowerCase().includes(txt)
     )) return false;
-    if (cat && !p.categories.includes(cat)) return false;
+    if (selectedCats.length > 0 && !selectedCats.some(c => p.categories.includes(c))) return false;
     if (ci  && p.ci !== ci) return false;
     if (areas === "4+" && p.num_non_meta_areas < 4) return false;
     if (areas && areas !== "4+" && p.num_non_meta_areas !== +areas) return false;
