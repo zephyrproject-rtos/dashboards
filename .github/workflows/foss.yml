@@ -35,8 +35,8 @@ jobs:
         working-directory: workspace
         run: |
           west init -l zephyr
-          # temp
-          west config manifest.group-filter -- -hal
+          # temp for testing
+          # west config manifest.group-filter -- -hal
 
       - name: Generate west project matrix
         id: matrix
