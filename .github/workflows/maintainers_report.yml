@@ -8,7 +8,7 @@ on:
       activity:
         description: 'GitHub activity query scope'
         required: false
-        default: 'maintainers'
+        default: 'none'
         type: choice
         options:
           - none
