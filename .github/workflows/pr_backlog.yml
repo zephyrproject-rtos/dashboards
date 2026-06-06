@@ -48,8 +48,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --user PyGithub PyYAML
+          python3 -m pip install --user PyGithub PyYAML awscli==1.45.11
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore cache and history from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_ROOT="dashboards/pr-backlog"
+
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/pr_backlog_cache.json" \
+            pr_backlog_cache.json || echo "No cache found in S3, starting fresh."
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/pr_backlog_history.json" \
+            pr_backlog_history.json || echo "No history found in S3, starting fresh."
 
       - name: Run PR backlog analysis
         env:
@@ -60,8 +74,8 @@ jobs:
             --output pr_backlog.html
             --history pr_backlog_history.json
             --cache pr_backlog_cache.json
-            --age "${{ inputs.age || '14' }}"
-            --max-prs "${{ inputs.max_prs || '500' }}"
+            --age "${{ inputs.age || '30' }}"
+            --max-prs "${{ inputs.max_prs || '600' }}"
             --verbose
           )
           if [[ "${{ inputs.exclude_drafts }}" == "true" ]]; then
@@ -91,13 +105,15 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          pip3 install awscli==1.45.11
-
           PUBLISH_BUCKET="testing.zephyrproject.org"
           PUBLISH_DOMAIN="testing.zephyrproject.io"
           PUBLISH_ROOT="dashboards/pr-backlog"
 
           aws s3 cp pr_backlog.html \
             "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          aws s3 cp pr_backlog_history.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/pr_backlog_history.json" || true
+          aws s3 cp pr_backlog_cache.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/pr_backlog_cache.json" || true
           echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
             >> "${GITHUB_STEP_SUMMARY}"
