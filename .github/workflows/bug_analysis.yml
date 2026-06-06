@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Bug Analysis
+
+on:
+  schedule:
+    - cron: '30 * * * *'   # Daily at 00:30 UTC
+  workflow_dispatch:
+    inputs:
+      max_issues:
+        description: 'Maximum number of issues to analyse'
+        required: false
+        default: '5000'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze-bugs:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'zephyrproject-rtos'
+
+    steps:
+      - name: Checkout Dashboard scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --user PyGithub awscli==1.45.11
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore cache and history from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_ROOT="dashboards/bug-analysis"
+
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/bugs_cache.json" \
+            bugs_cache.json || echo "No cache found in S3, starting fresh."
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/bugs_history.json" \
+            bugs_history.json || echo "No history found in S3, starting fresh."
+
+      - name: Run bug analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/analyze_bugs.py \
+            --output bugs.html \
+            --history bugs_history.json \
+            --cache bugs_cache.json \
+            --max-issues "${{ inputs.max_issues || '5000' }}" \
+            --verbose
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bug-analysis-report
+          path: bugs.html
+
+      - name: Upload history
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bug-analysis-history
+          path: bugs_history.json
+          if-no-files-found: ignore
+
+      - name: Publish to AWS S3
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/bug-analysis"
+
+          aws s3 cp bugs.html \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          aws s3 cp bugs_history.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/bugs_history.json" || true
+          aws s3 cp bugs_cache.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/bugs_cache.json" || true
+          echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
+            >> "${GITHUB_STEP_SUMMARY}"
