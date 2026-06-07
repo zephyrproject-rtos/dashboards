@@ -1450,16 +1450,49 @@ def render_html(org, repo, issues, generated, history=None):
 # ---------------------------------------------------------------------------
 
 def _load_cache(path):
-    """Load per-issue analysis cache.  Returns {} on any error."""
+    """Load per-issue analysis cache.  Returns {} on any error.
+
+    If the oldest entry is 7 or more days old the entire cache is discarded
+    so a full refresh is forced.
+    """
     p = pathlib.Path(path)
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        cache = json.loads(p.read_text(encoding="utf-8"))
     except Exception as exc:
         print(f"WARNING: Could not read cache {path}: {exc}; starting fresh.",
               file=sys.stderr)
         return {}
+
+    # Reset cache when the oldest entry is 7+ days old.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=7)
+    for entry in cache.values():
+        raw = entry.get("cached_at")
+        if not raw:
+            # Entry pre-dates cached_at tracking — treat as stale.
+            print(
+                f"Cache {path}: oldest entry has no cached_at timestamp; "
+                "resetting cache.",
+                file=sys.stderr,
+            )
+            return {}
+        try:
+            ts = datetime.datetime.fromisoformat(raw)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=datetime.timezone.utc)
+            if ts < cutoff:
+                print(
+                    f"Cache {path}: oldest entry is more than 7 days old "
+                    f"({ts.date()}); resetting cache.",
+                    file=sys.stderr,
+                )
+                return {}
+        except Exception:
+            return {}
+
+    return cache
 
 
 def _save_cache(path, cache):
@@ -1624,6 +1657,8 @@ def main():
                 if args.cache:
                     issue_cache[cache_key] = {
                         "updated_at": updated_iso,
+                        "cached_at":  datetime.datetime.now(
+                            datetime.timezone.utc).isoformat(),
                         "data":       data,
                     }
             except GithubException as exc:

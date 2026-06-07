@@ -2219,14 +2219,17 @@ def _load_cache(path):
     Load the per-PR analysis cache from *path*.
 
     Returns a dict mapping str(pr_number) ->
-        {"updated_at": <iso-string>, "data": <_analyze_pr result dict>}.
+        {"updated_at": <iso-string>, "cached_at": <iso-string>,
+         "data": <_analyze_pr result dict>}.
     Returns an empty dict if the file does not exist or cannot be parsed.
+    If the oldest entry is 7 or more days old the entire cache is discarded
+    so a full refresh is forced.
     """
     p = pathlib.Path(path)
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        cache = json.loads(p.read_text(encoding="utf-8"))
     except Exception as exc:
         print(
             f"WARNING: Could not read cache file {path}: {exc}; "
@@ -2234,6 +2237,35 @@ def _load_cache(path):
             file=sys.stderr,
         )
         return {}
+
+    # Reset cache when the oldest entry is 7+ days old.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=7)
+    for entry in cache.values():
+        raw = entry.get("cached_at")
+        if not raw:
+            # Entry pre-dates cached_at tracking — treat as stale.
+            print(
+                f"Cache {path}: oldest entry has no cached_at timestamp; "
+                "resetting cache.",
+                file=sys.stderr,
+            )
+            return {}
+        try:
+            ts = datetime.datetime.fromisoformat(raw)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=datetime.timezone.utc)
+            if ts < cutoff:
+                print(
+                    f"Cache {path}: oldest entry is more than 7 days old "
+                    f"({ts.date()}); resetting cache.",
+                    file=sys.stderr,
+                )
+                return {}
+        except Exception:
+            return {}
+
+    return cache
 
 
 def _save_cache(path, cache):
@@ -2486,6 +2518,8 @@ def main():
                 if args.cache:
                     pr_cache[cache_key] = {
                         "updated_at": pr_updated_iso,
+                        "cached_at":  datetime.datetime.now(
+                            datetime.timezone.utc).isoformat(),
                         "data": data,
                     }
             pr_data_list.append(data)
@@ -2496,6 +2530,8 @@ def main():
                 if args.cache:
                     pr_cache[cache_key] = {
                         "updated_at": pr_updated_iso,
+                        "cached_at":  datetime.datetime.now(
+                            datetime.timezone.utc).isoformat(),
                         "data": data,
                     }
             except GithubException as exc:
