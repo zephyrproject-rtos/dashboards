@@ -81,7 +81,19 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _ZEPHYR_BASE = _SCRIPT_DIR.parents[1]
-sys.path.insert(0, str(_SCRIPT_DIR.parent))
+# Add candidate directories for get_maintainer.py in priority order:
+#   1. <workspace>/zephyr/scripts/  – CI: zephyr checked out next to dashboards
+#   2. <_ZEPHYR_BASE>/scripts/      – local dev: _ZEPHYR_BASE is the zephyr root
+#   3. <_ZEPHYR_BASE>/zephyr/scripts/ – local dev: _ZEPHYR_BASE is the workspace root
+#   4. parent of script dir          – original behaviour (dashboards inside zephyr)
+for _p in [
+    str(Path.cwd() / "zephyr" / "scripts"),
+    str(_ZEPHYR_BASE / "scripts"),
+    str(_ZEPHYR_BASE / "zephyr" / "scripts"),
+    str(_SCRIPT_DIR.parent),
+]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 try:
     from get_maintainer import Maintainers
@@ -660,6 +672,11 @@ def _analyze_pr(pr, maint_obj, verbose=False):
         categories.append(CAT_ARCH_REVIEW)
     if has_stale:
         categories.append(CAT_STALE)
+    # Complexity / authorship signals apply regardless of approval state
+    if num_non_meta_areas >= SIZE_MANY_AREAS:
+        categories.append(CAT_MANY_AREAS)
+    if submitter_is_maintainer and pr.user and pr.user.login in assignees:
+        categories.append(CAT_MAINTAINER_SUBMITTED)
 
     if two_approvals_met:
         categories.append(CAT_NEARLY_APPROVED)
@@ -692,12 +709,6 @@ def _analyze_pr(pr, maint_obj, verbose=False):
             categories.append(CAT_CHANGES_REQUESTED)
         elif num_approvals == 1:
             categories.append(CAT_AWAITING_SECOND_REVIEW)
-
-        if num_non_meta_areas >= SIZE_MANY_AREAS:
-            categories.append(CAT_MANY_AREAS)
-
-        if submitter_is_maintainer and pr.user and pr.user.login in assignees:
-            categories.append(CAT_MAINTAINER_SUBMITTED)
 
         if total_lines > SIZE_LARGE_LINES:
             categories.append(CAT_LARGE_PR)
