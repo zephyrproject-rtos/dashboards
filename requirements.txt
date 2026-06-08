@@ -1,0 +1,3 @@
+PyGithub
+PyYAML
+awscli==1.45.11

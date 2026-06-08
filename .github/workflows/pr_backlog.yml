@@ -42,18 +42,20 @@ jobs:
           repository: zephyrproject-rtos/zephyr
           path: zephyr
           fetch-depth: 1
+          sparse-checkout: |
+            MAINTAINERS.yml
+          sparse-checkout-cone-mode: false
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: 3.12
           cache: pip
-          cache-dependency-path: zephyr/scripts/requirements-actions.txt
+          cache-dependency-path: requirements.txt
 
       - name: install-packages
-        working-directory: zephyr
         run: |
-          pip install -r scripts/requirements-actions.txt --require-hashes
+          pip install -r requirements.txt
 
       - name: Restore cache and history from S3
         env:
@@ -73,7 +75,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          export ZEPHYR_BASE="$PWD/zephyr"
           ARGS=(
             --maintainer-file zephyr/MAINTAINERS.yml
             --output pr_backlog.html

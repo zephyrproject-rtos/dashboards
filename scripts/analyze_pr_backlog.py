@@ -77,29 +77,116 @@ except ImportError:
     )
 
 # ---------------------------------------------------------------------------
-# get_maintainer integration
+# Minimal self-contained MAINTAINERS.yml parser
+#
+# Understands only the fields needed for area/maintainer analysis:
+#   files, files-regex, files-exclude, files-regex-exclude, maintainers, status
+# No dependency on get_maintainer.py or the Zephyr tree at import time.
 # ---------------------------------------------------------------------------
-ZEPHYR_BASE = os.environ.get('ZEPHYR_BASE')
-if ZEPHYR_BASE:
-    ZEPHYR_BASE = Path(ZEPHYR_BASE)
-else:
-	raise EnvironmentError(
-        "ZEPHYR_BASE environment variable is not set.  "
-        "Please set it to the root of your Zephyr repository."
-    )
-_SCRIPT_DIR = ZEPHYR_BASE / "scripts"
-_ZEPHYR_BASE = ZEPHYR_BASE.resolve()
-sys.path.insert(0, str(_SCRIPT_DIR))
-
 try:
-    from get_maintainer import Maintainers
-    _HAS_MAINTAINERS = True
+    from yaml import load as _yaml_load, YAMLError
+    try:
+        from yaml import CSafeLoader as _YAMLLoader
+    except ImportError:
+        from yaml import SafeLoader as _YAMLLoader
+    _HAS_YAML = True
 except ImportError:
-    _HAS_MAINTAINERS = False
-    raise ImportError(
-        "get_maintainer.py is required for area analysis.  "
-        "Please ensure it is present in the same directory as this script."
-    )
+    _HAS_YAML = False
+
+
+class _Area:
+    """Lightweight area record returned by MaintainersDB."""
+    __slots__ = ("name", "status", "maintainers", "_match", "_exclude")
+
+    def __init__(self, name, status, maintainers, match_fn, exclude_fn):
+        self.name        = name
+        self.status      = status
+        self.maintainers = maintainers
+        self._match      = match_fn
+        self._exclude    = exclude_fn
+
+    def matches(self, path):
+        return (self._match is not None
+                and self._match(path)
+                and not (self._exclude is not None and self._exclude(path)))
+
+
+def _build_match_fn(globs, regexes):
+    """Build a compiled regex that matches any of the given globs or regexes."""
+    if not globs and not regexes:
+        return None
+    parts = []
+    if globs:
+        glob_parts = []
+        for g in globs:
+            # Convert MAINTAINERS glob to regex:
+            #  *  -> [^/]*   (single path component wildcard)
+            #  ** -> .*      (multi-component wildcard, if used)
+            #  .  -> \.
+            gr = g.replace(".", "\\.").replace("**", "\x00").replace("*", "[^/]*").replace("\x00", ".*")
+            if not g.endswith("/"):
+                gr += "$"
+            glob_parts.append(gr)
+        parts.append("^(?:" + "|".join(glob_parts) + ")")
+    if regexes:
+        parts.extend(regexes)
+    return re.compile("|".join(parts)).search
+
+
+class MaintainersDB:
+    """
+    Minimal parser for Zephyr's MAINTAINERS.yml.
+
+    Usage::
+
+        db = MaintainersDB("path/to/MAINTAINERS.yml")
+        areas = db.path2areas("drivers/serial/uart_ns16550.c")
+        for area in areas:
+            print(area.name, area.maintainers)
+    """
+
+    def __init__(self, filename):
+        self.filename = pathlib.Path(filename)
+        self._areas   = []        # list of _Area, in definition order
+        self._load()
+
+    def _load(self):
+        if not _HAS_YAML:
+            raise ImportError(
+                "PyYAML is required for MAINTAINERS.yml parsing.  "
+                "Install with: pip install PyYAML"
+            )
+        with open(self.filename, encoding="utf-8") as f:
+            data = _yaml_load(f, Loader=_YAMLLoader)
+        if not isinstance(data, dict):
+            raise ValueError(f"{self.filename}: expected a YAML mapping at top level")
+        for name, entry in data.items():
+            if not isinstance(entry, dict):
+                continue
+            match_fn   = _build_match_fn(
+                entry.get("files", []),
+                entry.get("files-regex", []),
+            )
+            exclude_fn = _build_match_fn(
+                entry.get("files-exclude", []),
+                entry.get("files-regex-exclude", []),
+            )
+            if match_fn is None:
+                # Area has no file patterns — skip for path matching
+                continue
+            self._areas.append(_Area(
+                name        = name,
+                status      = entry.get("status"),
+                maintainers = entry.get("maintainers", []),
+                match_fn    = match_fn,
+                exclude_fn  = exclude_fn,
+            ))
+
+    def path2areas(self, path):
+        """Return list of _Area objects whose file patterns cover *path*."""
+        # Normalise: strip leading slash/dot, always use forward slashes
+        norm = path.lstrip("./").replace("\\", "/")
+        return [a for a in self._areas if a.matches(norm)]
 
 # ---------------------------------------------------------------------------
 # PR backlog categories
@@ -455,9 +542,9 @@ def _is_meta_area(name):
 def _maintainers_for_pr(maint_obj, pr_files):
     """
     Return (areas, all_maintainers_set) for the given list of changed file paths.
-    areas is a list of Area objects.
+    areas is a list of _Area objects.
     """
-    if not _HAS_MAINTAINERS or maint_obj is None:
+    if maint_obj is None:
         return [], set()
 
     seen_areas = {}
@@ -673,6 +760,12 @@ def _analyze_pr(pr, maint_obj, verbose=False):
     if has_stale:
         categories.append(CAT_STALE)
 
+    if num_non_meta_areas >= SIZE_MANY_AREAS:
+        categories.append(CAT_MANY_AREAS)
+
+    if submitter_is_maintainer and pr.user and pr.user.login in assignees:
+        categories.append(CAT_MAINTAINER_SUBMITTED)
+
     if two_approvals_met:
         categories.append(CAT_NEARLY_APPROVED)
     else:
@@ -704,12 +797,6 @@ def _analyze_pr(pr, maint_obj, verbose=False):
             categories.append(CAT_CHANGES_REQUESTED)
         elif num_approvals == 1:
             categories.append(CAT_AWAITING_SECOND_REVIEW)
-
-        if num_non_meta_areas >= SIZE_MANY_AREAS:
-            categories.append(CAT_MANY_AREAS)
-
-        if submitter_is_maintainer and pr.user and pr.user.login in assignees:
-            categories.append(CAT_MAINTAINER_SUBMITTED)
 
         if total_lines > SIZE_LARGE_LINES:
             categories.append(CAT_LARGE_PR)
@@ -2157,21 +2244,20 @@ def render_html(org, repo, age_days, pr_data_list, generated, history=None):
 def _debug_single_pr(gh_repo, pr_number, args):
     """Fetch one PR by number, run _analyze_pr, and print the result as JSON."""
     maint_obj = None
-    if _HAS_MAINTAINERS:
-        mf = pathlib.Path(args.maintainer_file)
-        if mf.exists():
-            try:
-                maint_obj = Maintainers(str(mf))
-            except Exception as exc:
-                print(
-                    f"WARNING: Could not load maintainer file: {exc}",
-                    file=sys.stderr,
-                )
-        else:
+    mf = pathlib.Path(args.maintainer_file)
+    if mf.exists():
+        try:
+            maint_obj = MaintainersDB(str(mf))
+        except Exception as exc:
             print(
-                f"WARNING: Maintainer file not found: {mf}",
+                f"WARNING: Could not load maintainer file: {exc}",
                 file=sys.stderr,
             )
+    else:
+        print(
+            f"WARNING: Maintainer file not found: {mf}",
+            file=sys.stderr,
+        )
 
     try:
         pr = gh_repo.get_pull(pr_number)
@@ -2331,9 +2417,9 @@ def parse_args():
     )
     parser.add_argument(
         "--maintainer-file",
-        default=str(_ZEPHYR_BASE / "MAINTAINERS.yml"),
+        default="MAINTAINERS.yml",
         metavar="FILE",
-        help="Path to MAINTAINERS.yml (default: auto-detected from tree).",
+        help="Path to MAINTAINERS.yml (default: MAINTAINERS.yml in CWD).",
     )
     parser.add_argument(
         "--max-prs",
@@ -2430,20 +2516,19 @@ def main():
 
     # ---- Load MAINTAINERS.yml ----
     maint_obj = None
-    if _HAS_MAINTAINERS:
-        mf = pathlib.Path(args.maintainer_file)
-        if mf.exists():
-            if args.verbose:
-                print(f"Loading maintainer file: {mf}", flush=True)
-            try:
-                maint_obj = Maintainers(str(mf))
-            except Exception as exc:
-                print(f"WARNING: Could not load maintainer file: {exc}", file=sys.stderr)
-        else:
-            print(
-                f"WARNING: Maintainer file not found: {mf}",
-                file=sys.stderr,
-            )
+    mf = pathlib.Path(args.maintainer_file)
+    if mf.exists():
+        if args.verbose:
+            print(f"Loading maintainer file: {mf}", flush=True)
+        try:
+            maint_obj = MaintainersDB(str(mf))
+        except Exception as exc:
+            print(f"WARNING: Could not load maintainer file: {exc}", file=sys.stderr)
+    else:
+        print(
+            f"WARNING: Maintainer file not found: {mf}",
+            file=sys.stderr,
+        )
 
     # ---- Load PR cache ----
     pr_cache = {}
