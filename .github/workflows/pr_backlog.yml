@@ -66,6 +66,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          export ZEPHYR_BASE="$PWD/zephyr"
           ARGS=(
             --maintainer-file zephyr/MAINTAINERS.yml
             --output pr_backlog.html

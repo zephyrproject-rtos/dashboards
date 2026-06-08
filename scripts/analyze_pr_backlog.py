@@ -79,15 +79,27 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # get_maintainer integration
 # ---------------------------------------------------------------------------
-_SCRIPT_DIR = Path(__file__).resolve().parent
-_ZEPHYR_BASE = _SCRIPT_DIR.parents[1]
-sys.path.insert(0, str(_SCRIPT_DIR.parent))
+ZEPHYR_BASE = os.environ.get('ZEPHYR_BASE')
+if ZEPHYR_BASE:
+    ZEPHYR_BASE = Path(ZEPHYR_BASE)
+else:
+	raise EnvironmentError(
+        "ZEPHYR_BASE environment variable is not set.  "
+        "Please set it to the root of your Zephyr repository."
+    )
+_SCRIPT_DIR = ZEPHYR_BASE / "scripts"
+_ZEPHYR_BASE = ZEPHYR_BASE.resolve()
+sys.path.insert(0, str(_SCRIPT_DIR))
 
 try:
     from get_maintainer import Maintainers
     _HAS_MAINTAINERS = True
 except ImportError:
     _HAS_MAINTAINERS = False
+    raise ImportError(
+        "get_maintainer.py is required for area analysis.  "
+        "Please ensure it is present in the same directory as this script."
+    )
 
 # ---------------------------------------------------------------------------
 # PR backlog categories
