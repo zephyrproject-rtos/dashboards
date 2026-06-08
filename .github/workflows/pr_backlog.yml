@@ -42,9 +42,6 @@ jobs:
           repository: zephyrproject-rtos/zephyr
           path: zephyr
           fetch-depth: 1
-          sparse-checkout: |
-            MAINTAINERS.yml
-            scripts/get_maintainer.py
 
       - name: Install dependencies
         run: |
