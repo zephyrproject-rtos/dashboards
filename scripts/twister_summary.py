@@ -321,6 +321,26 @@ tbody tr:hover{background:#f0f3f6}
 .dm-ok{color:#2da44e}.dm-warn{color:#bf8700}.dm-crit{color:#cf222e}
 @media(max-width:700px){.topnav{flex-wrap:wrap;gap:0}.topnav a{padding:7px 9px}}
 @media(max-width:700px){.cards{flex-direction:column}.card{max-width:100%}}
+/* filterable tables */
+tr.filter-row th{padding:4px 6px;background:#f6f8fa}
+tr.filter-row input{width:100%;padding:3px 6px;font-size:0.78em;border:1px solid var(--border);
+  border-radius:4px;background:#fff;box-sizing:border-box}
+tr.filter-row input:focus{outline:none;border-color:#0969da;
+  box-shadow:0 0 0 2px rgba(9,105,218,.15)}
+/* attention summary */
+.attention-grid{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:28px}
+.attention-card{background:#fff;border:1px solid var(--border);border-radius:8px;
+  padding:14px 18px;flex:1 1 300px}
+.attention-card h3{font-size:0.95em;margin-bottom:10px;display:flex;align-items:center;
+  gap:8px;border-bottom:1px solid var(--border);padding-bottom:6px}
+.attention-item{display:flex;align-items:center;gap:8px;padding:5px 0;
+  font-size:0.84em;border-bottom:1px solid #f0f3f6}
+.attention-item:last-child{border-bottom:none}
+.attention-count{font-weight:700;min-width:32px;text-align:right;color:#cf222e}
+.attention-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attention-name a{color:var(--text);text-decoration:none;font-family:monospace;font-size:0.9em}
+.attention-name a:hover{color:#0969da;text-decoration:underline}
+.attention-none{color:#2da44e;font-size:0.85em;padding:6px 0}
 """
 
 
@@ -389,6 +409,7 @@ def _html_top(title: str, env: dict | None, total_suites: int,
 <nav class="topnav">
   <span class="nav-brand">Twister</span>
   <a href="#summary">Summary</a>
+  <a href="#attention">Attention</a>
   <a href="#legend">Legend</a>
   {insights_nav}
   <a href="#tree">By Test Name</a>
@@ -404,6 +425,162 @@ def _html_top(title: str, env: dict | None, total_suites: int,
 </p>
 <div class="cards">{card_html}</div>
 """
+
+
+_FILTER_JS = """
+<script>
+(function(){
+  document.querySelectorAll('table.filterable').forEach(function(tbl){
+    var inputs=Array.from(tbl.querySelectorAll('tr.filter-row input'));
+    if(!inputs.length)return;
+    function apply(){
+      tbl.querySelectorAll('tbody tr').forEach(function(row){
+        var show=true;
+        inputs.forEach(function(inp,i){
+          var v=inp.value.trim().toLowerCase();
+          if(!v)return;
+          var c=row.cells[i];
+          if(!c)return;
+          if(c.textContent.toLowerCase().indexOf(v)===-1)show=false;
+        });
+        row.style.display=show?'':'none';
+      });
+    }
+    inputs.forEach(function(inp){inp.addEventListener('input',apply);});
+  });
+})();
+</script>
+"""
+
+
+def _filter_row(n_cols: int) -> str:
+    """Return a <tr> of filter inputs, one per column."""
+    cells = ''.join(
+        '<th><input type="text" placeholder="Filter…" aria-label="Filter column"></th>'
+        for _ in range(n_cols)
+    )
+    return f'<tr class="filter-row">{cells}</tr>\n'
+
+
+def _attention_summary_html(ins: dict) -> str:
+    """Render a compact top-of-page summary of top issues and tests needing attention."""
+
+    # --- Top failing tests ---
+    failing = ins['multi_fail']
+    if failing:
+        fail_items = ''.join(
+            f'<div class="attention-item">'
+            f'<span class="attention-count">{f["count"]}</span>'
+            f'<span class="attention-name" title="{f["name"]}">'
+            f'<a href="#ins-failing">{f["name"]}</a></span>'
+            f'</div>'
+            for f in failing[:10]
+        )
+        if len(failing) > 10:
+            fail_items += (
+                f'<div class="attention-item"><span class="subtle" style="font-size:0.8em">'
+                f'… and {len(failing)-10} more — see <a href="#ins-failing">Insights</a>'
+                f'</span></div>'
+            )
+    else:
+        fail_items = '<div class="attention-none">✔ No test failures</div>'
+
+    # --- Top hot boards ---
+    hot = ins['platform_fail_hot']
+    if hot:
+        hot_items = ''.join(
+            f'<div class="attention-item">'
+            f'<span class="attention-count">{p["count"]}</span>'
+            f'<span class="attention-name" title="{p["platform"]}">'
+            f'<a href="#ins-platform"><code>{p["platform"]}</code></a></span>'
+            f'</div>'
+            for p in hot[:10]
+        )
+        if len(hot) > 10:
+            hot_items += (
+                f'<div class="attention-item"><span class="subtle" style="font-size:0.8em">'
+                f'… and {len(hot)-10} more — see <a href="#ins-platform">Insights</a>'
+                f'</span></div>'
+            )
+    else:
+        hot_items = '<div class="attention-none">✔ No platform failures</div>'
+
+    # --- Other critical/warning pills ---
+    pills: list[str] = []
+    if ins['all_filtered']:
+        n = len(ins['all_filtered'])
+        pills.append(
+            f'<a href="#ins-badfilter" style="text-decoration:none">'
+            f'<span class="insight-label tag-badfilter">BAD FILTER</span>'
+            f' {n} suite{"s" if n!=1 else ""}</a>'
+        )
+    if ins['empty_tc']:
+        n = len(ins['empty_tc'])
+        pills.append(
+            f'<a href="#ins-emptytc" style="text-decoration:none">'
+            f'<span class="insight-label tag-badfilter">EMPTY TC</span>'
+            f' {n} suite{"s" if n!=1 else ""}</a>'
+        )
+    if ins['flaky']:
+        n = len(ins['flaky'])
+        pills.append(
+            f'<a href="#ins-flaky" style="text-decoration:none">'
+            f'<span class="insight-label tag-flaky">FLAKY</span>'
+            f' {n} suite{"s" if n!=1 else ""}</a>'
+        )
+    if ins['slow_build']:
+        n = len(ins['slow_build'])
+        pills.append(
+            f'<a href="#ins-slowbuild" style="text-decoration:none">'
+            f'<span class="insight-label tag-slow">SLOW BUILD</span>'
+            f' {n} outlier{"s" if n!=1 else ""}</a>'
+        )
+    if ins['slow_exec']:
+        n = len(ins['slow_exec'])
+        pills.append(
+            f'<a href="#ins-slowexec" style="text-decoration:none">'
+            f'<span class="insight-label tag-slow">SLOW EXEC</span>'
+            f' {n} outlier{"s" if n!=1 else ""}</a>'
+        )
+    if ins['mixed_noexec']:
+        n = len(ins['mixed_noexec'])
+        pills.append(
+            f'<a href="#ins-noexec" style="text-decoration:none">'
+            f'<span class="insight-label tag-noexec">NO EXEC</span>'
+            f' {n} suite{"s" if n!=1 else ""}</a>'
+        )
+
+    if pills:
+        pill_html = (
+            '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;'
+            'font-size:0.85em">' + ''.join(pills) + '</div>'
+        )
+        other_card = (
+            f'<div class="attention-card" style="border-color:#cf222e">'
+            f'<h3><span style="color:#cf222e">⚠</span> Other Issues</h3>'
+            f'{pill_html}</div>'
+        )
+    else:
+        other_card = (
+            f'<div class="attention-card" style="border-color:#2da44e">'
+            f'<h3><span style="color:#2da44e">✔</span> No Other Issues</h3>'
+            f'<div class="attention-none">All insight checks passed.</div></div>'
+        )
+
+    return (
+        f'<h2 id="attention">Tests Needing Attention</h2>'
+        f'<div class="attention-grid">'
+        f'<div class="attention-card">'
+        f'<h3><span class="insight-label tag-badfilter">FAILING</span>'
+        f'&nbsp;Top Failing Tests</h3>'
+        f'{fail_items}</div>'
+        f'<div class="attention-card">'
+        f'<h3><span class="insight-label tag-badfilter">PLATFORM</span>'
+        f'&nbsp;Boards with Most Failures</h3>'
+        f'{hot_items}</div>'
+        f'{other_card}'
+        f'</div>\n'
+    )
 
 
 def _arch_table(rows: list[dict]) -> str:
@@ -423,7 +600,9 @@ def _arch_table(rows: list[dict]) -> str:
             f'<td>{badges}</td>'
             f'<td>{_pct_bar(r["pass_rate"])}</td></tr>'
         )
-    return f'<h2 id="arch">Results by Architecture</h2><table><thead>{thead}</thead><tbody>{body}</tbody></table>'
+    frow = _filter_row(7)
+    return (f'<h2 id="arch">Results by Architecture</h2>'
+            f'<table class="filterable"><thead>{thead}{frow}</thead><tbody>{body}</tbody></table>')
 
 
 def _toolchain_table(rows: list[dict]) -> str:
@@ -441,7 +620,9 @@ def _toolchain_table(rows: list[dict]) -> str:
             f'<td>{badges}</td>'
             f'<td>{_pct_bar(r["pass_rate"])}</td></tr>'
         )
-    return f'<h2 id="toolchain">Results by Toolchain</h2><table><thead>{thead}</thead><tbody>{body}</tbody></table>'
+    frow = _filter_row(6)
+    return (f'<h2 id="toolchain">Results by Toolchain</h2>'
+            f'<table class="filterable"><thead>{thead}{frow}</thead><tbody>{body}</tbody></table>')
 
 
 def _board_table(rows: list[dict]) -> str:
@@ -475,7 +656,9 @@ def _board_table(rows: list[dict]) -> str:
             f'<td class="subtle">{r["exec_time"]:.1f}</td>'
             f'</tr>'
         )
-    return f'<h2 id="boards">Results by Board / Platform ({len(rows)} boards)</h2><table><thead>{thead}</thead><tbody>{body}</tbody></table>'
+    frow = _filter_row(10)
+    return (f'<h2 id="boards">Results by Board / Platform ({len(rows)} boards)</h2>'
+            f'<table class="filterable"><thead>{thead}{frow}</thead><tbody>{body}</tbody></table>')
 
 
 # ---------------------------------------------------------------------------
@@ -1046,7 +1229,7 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
         _add(_ok_block('All executed suites reported at least one test case'),
              'ins-emptytc', '', '✔', 'No empty suites', is_ok=True)
 
-    return '\n'.join(sections) + '\n', nav_items
+    return '\n'.join(sections) + '\n', nav_items, ins
 
 
 def _legend() -> str:
@@ -1097,7 +1280,8 @@ def _failed_table(suites: list[dict]) -> str:
             f'</tr>'
         )
     return (f'<h2 id="failures">Failed / Error Suites ({len(suites)})</h2>'
-            f'<table><thead>{thead}</thead><tbody>{body}</tbody></table>')
+            f'<table class="filterable"><thead>{thead}{_filter_row(4)}</thead>'
+            f'<tbody>{body}</tbody></table>')
 
 
 # ---------------------------------------------------------------------------
@@ -1138,7 +1322,7 @@ def main() -> int:
     suites_ran, suites_notrun = run_notrun_counts(testsuites)
 
     # Compute insights first so the nav dropdown can be built
-    insights_html, insight_items = _insights_html(testsuites)
+    insights_html, insight_items, ins = _insights_html(testsuites)
 
     html = _html_top(
         args.title, env,
@@ -1150,6 +1334,7 @@ def main() -> int:
         suites_notrun=suites_notrun,
         insight_items=insight_items,
     )
+    html += _attention_summary_html(ins)
     html += _legend()
     html += insights_html
     html += _name_tree_html(testsuites)
@@ -1157,6 +1342,7 @@ def main() -> int:
     html += _toolchain_table(toolchain_stats(testsuites))
     html += _board_table(board_stats(testsuites))
     html += _failed_table(failed_suites(testsuites))
+    html += _FILTER_JS
     html += '\n</body>\n</html>\n'
 
     Path(args.output).write_text(html, encoding='utf-8')
