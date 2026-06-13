@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Twister Summary
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Specific twister.yaml workflow run ID in zephyrproject-rtos/zephyr (leave empty for latest successful run)'
+        required: false
+        default: ''
+      title:
+        description: 'Report title'
+        required: false
+        default: 'Twister Test Run Summary'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  twister-summary:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'zephyrproject-rtos'
+
+    steps:
+      - name: Checkout Dashboard scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve twister.yaml run ID
+        id: resolve-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ZEPHYR_REPO="zephyrproject-rtos/zephyr"
+          WORKFLOW="twister.yaml"
+
+          if [[ -n "${{ inputs.run_id }}" ]]; then
+            RUN_ID="${{ inputs.run_id }}"
+          else
+            RUN_ID=$(gh run list \
+              --repo "${ZEPHYR_REPO}" \
+              --workflow "${WORKFLOW}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+          fi
+
+          if [[ -z "${RUN_ID}" ]]; then
+            echo "Could not find a successful run of ${WORKFLOW} in ${ZEPHYR_REPO}"
+            exit 1
+          fi
+
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+          echo "Using run ID: ${RUN_ID}"
+
+      - name: Download twister artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts
+          gh run download "${{ steps.resolve-run.outputs.run_id }}" \
+            --repo zephyrproject-rtos/zephyr \
+            --pattern "twister_report*" \
+            --dir artifacts/
+
+      - name: Merge twister.json files and generate HTML report
+        run: |
+          mapfile -d '' JSON_FILES < <(find artifacts/ -name 'twister.json' -print0 | sort -z)
+
+          echo "Found ${#JSON_FILES[@]} twister.json file(s)"
+
+          if [[ ${#JSON_FILES[@]} -eq 0 ]]; then
+            echo "No twister.json files found in downloaded artifacts" >&2
+            exit 1
+          fi
+
+          python3 scripts/twister_summary.py \
+            --output twister_summary.html \
+            --title "${{ inputs.title || 'Twister Test Run Summary' }}" \
+            "${JSON_FILES[@]}"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: twister-summary-report
+          path: twister_summary.html
+
+      - name: Publish to AWS S3
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/twister-summary"
+
+          aws s3 cp twister_summary.html \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
+            >> "${GITHUB_STEP_SUMMARY}"
