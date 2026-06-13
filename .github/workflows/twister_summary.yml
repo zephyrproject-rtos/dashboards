@@ -61,6 +61,7 @@ jobs:
               --workflow "${WORKFLOW}" \
               --status success \
               --limit 1 \
+              --event push \
               --json databaseId \
               --jq '.[0].databaseId')
           fi
@@ -80,7 +81,7 @@ jobs:
           mkdir -p artifacts
           gh run download "${{ steps.resolve-run.outputs.run_id }}" \
             --repo zephyrproject-rtos/zephyr \
-            --pattern "twister_report*" \
+            --pattern "Unit Test**" \
             --dir artifacts/
 
       - name: Merge twister.json files and generate HTML report
