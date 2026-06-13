@@ -327,6 +327,12 @@ tr.filter-row input{width:100%;padding:3px 6px;font-size:0.78em;border:1px solid
   border-radius:4px;background:#fff;box-sizing:border-box}
 tr.filter-row input:focus{outline:none;border-color:#0969da;
   box-shadow:0 0 0 2px rgba(9,105,218,.15)}
+/* sortable column headers */
+thead tr:first-child th{cursor:pointer;user-select:none;white-space:nowrap}
+thead tr:first-child th::after{content:' \2195';font-size:0.7em;color:#9aa2ab;
+  display:inline-block;margin-left:3px}
+thead tr:first-child th.sort-asc::after{content:' \25B2';color:#0969da}
+thead tr:first-child th.sort-desc::after{content:' \25BC';color:#0969da}
 /* attention summary */
 .attention-grid{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:28px}
 .attention-card{background:#fff;border:1px solid var(--border);border-radius:8px;
@@ -432,9 +438,16 @@ _FILTER_JS = """
 (function(){
   document.querySelectorAll('table.filterable').forEach(function(tbl){
     var inputs=Array.from(tbl.querySelectorAll('tr.filter-row input'));
-    if(!inputs.length)return;
-    function apply(){
-      tbl.querySelectorAll('tbody tr').forEach(function(row){
+    var headerCells=Array.from(tbl.querySelectorAll('thead tr:first-child th'));
+    var sortCol=-1,sortAsc=true;
+
+    function visibleRows(){
+      return Array.from(tbl.querySelectorAll('tbody tr'))
+                  .filter(function(r){return r.style.display!=='none';});
+    }
+
+    function applyFilter(){
+      Array.from(tbl.querySelectorAll('tbody tr')).forEach(function(row){
         var show=true;
         inputs.forEach(function(inp,i){
           var v=inp.value.trim().toLowerCase();
@@ -446,7 +459,39 @@ _FILTER_JS = """
         row.style.display=show?'':'none';
       });
     }
-    inputs.forEach(function(inp){inp.addEventListener('input',apply);});
+
+    function cellVal(row,i){
+      var c=row.cells[i];
+      return c?c.textContent.trim():'';
+    }
+
+    function applySort(){
+      if(sortCol<0)return;
+      var tbody=tbl.querySelector('tbody');
+      var rows=Array.from(tbody.querySelectorAll('tr'));
+      rows.sort(function(a,b){
+        var av=cellVal(a,sortCol),bv=cellVal(b,sortCol);
+        var an=parseFloat(av.replace(/[^0-9.+\x2d]/g,'')),bn=parseFloat(bv.replace(/[^0-9.+\x2d]/g,''));
+        var cmp=(!isNaN(an)&&!isNaN(bn))?(an-bn):av.localeCompare(bv);
+        return sortAsc?cmp:-cmp;
+      });
+      rows.forEach(function(r){tbody.appendChild(r);});
+    }
+
+    if(inputs.length){
+      inputs.forEach(function(inp){inp.addEventListener('input',function(){
+        applyFilter();applySort();
+      });});
+    }
+
+    headerCells.forEach(function(th,i){
+      th.addEventListener('click',function(){
+        if(sortCol===i){sortAsc=!sortAsc;}else{sortCol=i;sortAsc=true;}
+        headerCells.forEach(function(h){h.classList.remove('sort-asc','sort-desc');});
+        th.classList.add(sortAsc?'sort-asc':'sort-desc');
+        applySort();
+      });
+    });
   });
 })();
 </script>
