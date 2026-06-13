@@ -971,7 +971,9 @@ def _zero_exec_table(entries: list[dict], extra_col: str = '') -> str:
         f'</tr>'
         for e in entries
     )
-    return f'<table><thead>{thead}</thead><tbody>{body}</tbody></table>'
+    n_cols = 6 + (1 if extra_col else 0)
+    return (f'<table class="filterable"><thead>{thead}{_filter_row(n_cols)}</thead>'
+            f'<tbody>{body}</tbody></table>')
 
 
 def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
@@ -1064,7 +1066,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             f'<td>{_badge(f["status"], 1)}</td></tr>'
             for f in ins['flaky']
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(4)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             f'{n} flaky test suite{"s" if n!=1 else ""} (needed retries to pass)',
             tag,
@@ -1091,7 +1094,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             + f'</td><td>{f["count"]}</td></tr>'
             for f in ins['multi_fail']
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(3)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             f'{len(ins["multi_fail"])} test name{"s" if len(ins["multi_fail"])!=1 else ""} with failures',
             tag,
@@ -1113,7 +1117,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             f'<tr><td><code>{p["platform"]}</code></td><td>{p["count"]}</td></tr>'
             for p in ins['platform_fail_hot'][:20]
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(2)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             'Platforms with most failing suites',
             tag,
@@ -1137,7 +1142,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             f'<td class="insight-warn">+{s["z"]:.1f}σ</td></tr>'
             for s in ins['slow_build'][:20]
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(4)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             f'{n} build-time outlier{"s" if n!=1 else ""} ('
             f'threshold\u00a0\u2265\u00a0{thresh:.0f}\u00a0s\u00a0=\u00a0mean\u00a0+\u00a02σ)',
@@ -1165,7 +1171,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             f'<td class="insight-warn">+{s["z"]:.1f}σ</td></tr>'
             for s in ins['slow_exec'][:20]
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(4)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             f'{n} execution-time outlier{"s" if n!=1 else ""} ('
             f'threshold\u00a0\u2265\u00a0{thresh:.0f}\u00a0s\u00a0=\u00a0mean\u00a0+\u00a02σ)',
@@ -1191,7 +1198,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             f'<td>{_badge(lc["status"], 1)}</td></tr>'
             for lc in ins['low_coverage']
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(3)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             f'{n} executed test suite{"s" if n!=1 else ""} with only one platform',
             tag,
@@ -1215,7 +1223,8 @@ def _insights_html(testsuites: list[dict]) -> tuple[str, list[dict]]:
             f'<td>{_badge(e["status"], 1)}</td></tr>'
             for e in ins['empty_tc']
         )
-        body = f'<table><thead>{thead}</thead><tbody>{body_rows}</tbody></table>'
+        body = (f'<table class="filterable"><thead>{thead}{_filter_row(3)}</thead>'
+                f'<tbody>{body_rows}</tbody></table>')
         _add(_insight_block(
             f'{n} executed suite{"s" if n!=1 else ""} reported no test cases',
             tag,
