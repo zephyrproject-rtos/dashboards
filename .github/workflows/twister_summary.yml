@@ -58,6 +58,7 @@ jobs:
           else
             RUN_ID=$(gh run list \
               --repo "${ZEPHYR_REPO}" \
+              --branch main \
               --workflow "${WORKFLOW}" \
               --status success  --status failure \
               --limit 1 \
