@@ -234,15 +234,24 @@ def _day_windows(start: datetime, end: datetime):
         day += timedelta(days=1)
 
 
+def latest_cached_date(cache: dict) -> str | None:
+    """Most recent ``created_at`` date (YYYY-MM-DD) among cached runs, if any."""
+    dates = [r["created_at"][:10] for r in cache.get("runs", {}).values()
+             if r.get("created_at")]
+    return max(dates) if dates else None
+
+
 def fetch_runs(gh: GitHub, repo: str, workflows: list[dict], start: datetime,
                end: datetime | None, branch: str | None, cap: int | None,
                cache: dict, verbose: bool) -> dict:
-    """Return ``{run_id: record}`` for runs in the window, merged with cache.
+    """Return ``{run_id: record}`` merged with the cache (full history kept).
 
-    The runs-listing endpoint is capped at 1000 results per query, so we fetch
-    one UTC day at a time per workflow (a busy workflow can exceed 1000 runs
-    over a multi-week window but rarely within a single day) and stop paging a
-    day once it reaches runs already cached as completed.
+    Only the ``[start, end]`` window is queried from the API; everything
+    already in the cache is preserved.  The runs-listing endpoint is capped at
+    1000 results per query, so we fetch one UTC day at a time per workflow (a
+    busy workflow can exceed 1000 runs over a multi-week window but rarely
+    within a single day) and stop paging a day once it reaches runs already
+    cached as completed.
     """
     win_end = end or datetime.now(timezone.utc)
     records: dict[int, dict] = dict(cache.get("runs", {}))
@@ -274,7 +283,11 @@ def fetch_runs(gh: GitHub, repo: str, workflows: list[dict], start: datetime,
             print(f"  {wf.get('path', wf.get('name'))}: {n} new/updated runs",
                   file=sys.stderr)
 
-    # Drop runs that fell outside the requested window (cache may be wider).
+    return records
+
+
+def window_records(records: dict, start: datetime, end: datetime | None) -> dict:
+    """Subset of ``records`` whose ``created_at`` falls in ``[start, end]``."""
     lo = start.date().isoformat()
     hi = end.date().isoformat() if end else "9999-12-31"
     return {
@@ -771,7 +784,13 @@ def parse_args() -> argparse.Namespace:
                    help="Workflow file basename to include, e.g. twister.yaml "
                         "(repeatable; default: all workflows)")
     p.add_argument("--since", type=int, default=30,
-                   help="Look back this many days (default: 30)")
+                   help="Look back this many days (default: 30). Use 0 for "
+                        "auto/incremental: fetch only runs created since the "
+                        "newest run already in --cache, and report the full "
+                        "cached history.")
+    p.add_argument("--bootstrap-days", type=int, default=90,
+                   help="On the first auto run (empty cache), look back this "
+                        "many days (default: 90)")
     p.add_argument("--start", help="Start date YYYY-MM-DD (overrides --since)")
     p.add_argument("--end", help="End date YYYY-MM-DD (default: today)")
     p.add_argument("--branch", help="Restrict to a single branch")
@@ -820,14 +839,9 @@ def main() -> int:
     elif not token and fallback:
         token, fallback = fallback, None
 
-    if args.start:
-        start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
-    else:
-        start = datetime.now(timezone.utc) - timedelta(days=args.since)
+    now = datetime.now(timezone.utc)
     end = (datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
            if args.end else None)
-    window = (f"{start.date()} → "
-              f"{(end.date() if end else datetime.now(timezone.utc).date())}")
 
     gh = GitHub(token, verbose=args.verbose, fallback_token=fallback)
 
@@ -846,8 +860,34 @@ def main() -> int:
         print(f"Selected {len(workflows)} workflow(s).", file=sys.stderr)
 
     cache = load_json(args.cache)
-    records = fetch_runs(gh, args.repo, workflows, start, end, args.branch,
-                         args.max_runs, cache, args.verbose)
+
+    # Decide how far back to *query* the API. Auto mode (--since 0) only pulls
+    # runs newer than what is already cached; the report still covers the full
+    # cached history.
+    auto = args.since == 0 and not args.start
+    if args.start:
+        fetch_start = datetime.fromisoformat(args.start).replace(
+            tzinfo=timezone.utc)
+    elif auto:
+        last = latest_cached_date(cache)
+        if last:
+            # Re-fetch from the last cached day (1-day overlap) so runs that
+            # completed or appeared late are picked up.
+            fetch_start = (datetime.fromisoformat(last).replace(
+                tzinfo=timezone.utc) - timedelta(days=1))
+            if args.verbose:
+                print(f"Auto mode: fetching runs since {fetch_start.date()} "
+                      f"(latest cached: {last}).", file=sys.stderr)
+        else:
+            fetch_start = now - timedelta(days=args.bootstrap_days)
+            if args.verbose:
+                print(f"Auto mode: empty cache, bootstrapping "
+                      f"{args.bootstrap_days} days.", file=sys.stderr)
+    else:
+        fetch_start = now - timedelta(days=args.since)
+
+    records = fetch_runs(gh, args.repo, workflows, fetch_start, end,
+                         args.branch, args.max_runs, cache, args.verbose)
 
     if args.billable:
         # Carry forward billable_ms already in cache, then fill gaps.
@@ -859,8 +899,21 @@ def main() -> int:
 
     save_cache(args.cache, records)
 
-    agg = aggregate(records, billable=args.billable)
-    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # The report covers the full cached history in auto mode, otherwise the
+    # requested look-back window.
+    report = records if auto else window_records(records, fetch_start, end)
+    if args.workflow:
+        # A shared cache may hold workflows beyond the current selection.
+        selected = {w.get("path", "").split("/")[-1] for w in workflows}
+        report = {rid: r for rid, r in report.items()
+                  if _wf_label(r) in selected}
+    rdates = sorted(r["created_at"][:10] for r in report.values()
+                    if r.get("created_at"))
+    window = (f"{rdates[0]} → {rdates[-1]}" if rdates else
+              f"{fetch_start.date()} → {(end or now).date()}")
+
+    agg = aggregate(report, billable=args.billable)
+    generated = now.strftime("%Y-%m-%d %H:%M UTC")
     html_out = render_html(args.repo, agg, generated, window)
     Path(args.output).write_text(html_out, encoding="utf-8")
     append_history(args.history, agg, generated)

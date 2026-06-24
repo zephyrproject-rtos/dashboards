@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       since:
-        description: 'Look back this many days'
+        description: 'Look back this many days (0 = auto/incremental)'
         required: false
-        default: '90'
+        default: '0'
       workflow:
         description: 'Workflow file basename to focus on (blank = all)'
         required: false
@@ -68,7 +68,7 @@ jobs:
           fi
           python3 scripts/actions_usage.py \
             --repo zephyrproject-rtos/zephyr \
-            --since "${{ inputs.since || '90' }}" \
+            --since "${{ inputs.since || '0' }}" \
             ${WORKFLOW_ARG} \
             --output actions_usage.html \
             --cache actions_usage_cache.json \
