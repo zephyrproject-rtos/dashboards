@@ -329,6 +329,7 @@ def aggregate(records: dict, billable: bool) -> dict:
     per_week_runs: dict[str, dict] = defaultdict(lambda: defaultdict(int))
     per_week_min: dict[str, dict] = defaultdict(lambda: defaultdict(float))
     conclusions: dict[str, int] = defaultdict(int)
+    wf_conclusions: dict[str, dict] = defaultdict(lambda: defaultdict(int))
 
     wf_stats: dict[str, dict] = defaultdict(
         lambda: {"runs": 0, "minutes": 0.0, "success": 0, "failure": 0,
@@ -349,6 +350,7 @@ def aggregate(records: dict, billable: bool) -> dict:
 
         concl = rec.get("conclusion") or rec.get("status") or "unknown"
         conclusions[concl] += 1
+        wf_conclusions[wf][concl] += 1
 
         s = wf_stats[wf]
         s["runs"] += 1
@@ -383,6 +385,7 @@ def aggregate(records: dict, billable: bool) -> dict:
         "week_min": week_min,
         "wf_stats": {wf: wf_stats[wf] for wf in workflows},
         "conclusions": dict(conclusions),
+        "wf_conclusions": {wf: dict(wf_conclusions[wf]) for wf in workflows},
         "total_runs": len(records),
         "total_minutes": round(sum(s["minutes"] for s in wf_stats.values()), 1),
         "billable": billable,
@@ -411,7 +414,7 @@ def render_html(repo: str, agg: dict, generated: str, window: str) -> str:
         avg = s["minutes"] / runs if runs else 0.0
         rate = 100.0 * s["success"] / runs if runs else 0.0
         rows.append(
-            "<tr>"
+            f'<tr data-wf="{html.escape(wf)}">'
             f'<td><span class="dot" style="background:{wf_colors[wf]}"></span>'
             f"{html.escape(wf)}</td>"
             f"<td class='num'>{runs}</td>"
@@ -432,22 +435,23 @@ def render_html(repo: str, agg: dict, generated: str, window: str) -> str:
             for wf in workflows
         ])
 
-    conclusion_data = json.dumps({
-        "labels": list(agg["conclusions"].keys()),
-        "data": list(agg["conclusions"].values()),
-        "colors": [_CONCLUSION_COLOR.get(k, "#6e7781")
-                   for k in agg["conclusions"]],
-    })
+    # Stable colour per conclusion label (used by the outcomes doughnut as it
+    # is rebuilt for the selected workflow).
+    all_concls = sorted(agg["conclusions"], key=agg["conclusions"].get,
+                        reverse=True)
+    concl_colors = {k: _CONCLUSION_COLOR.get(k, "#6e7781") for k in all_concls}
 
-    payload = {
-        "days": agg["days"],
-        "weeks": agg["weeks"],
-        "dayRuns": datasets(agg["day_runs"]),
-        "dayMin": datasets(agg["day_min"]),
-        "weekRuns": datasets(agg["week_runs"]),
-        "weekMin": datasets(agg["week_min"]),
-        "conclusion": conclusion_data,
-    }
+    # Per-workflow rollups consumed by the selector in the browser.
+    wf_stats_js = {wf: {"runs": s["runs"], "minutes": round(s["minutes"], 1)}
+                   for wf, s in agg["wf_stats"].items()}
+
+    # Selector options, sorted by total minutes desc to match the table.
+    wf_order = sorted(workflows, key=lambda w: agg["wf_stats"][w]["minutes"],
+                      reverse=True)
+    options = '<option value="__all__">All workflows</option>\n' + "\n".join(
+        f'<option value="{html.escape(wf)}">{html.escape(wf)}</option>'
+        for wf in wf_order
+    )
 
     return _TEMPLATE.format(
         repo=html.escape(repo),
@@ -459,13 +463,17 @@ def render_html(repo: str, agg: dict, generated: str, window: str) -> str:
         total_hours=f"{agg['total_minutes'] / 60:.0f}",
         n_workflows=len(workflows),
         wf_table=wf_table,
-        days_json=json.dumps(payload["days"]),
-        weeks_json=json.dumps(payload["weeks"]),
-        day_runs_json=payload["dayRuns"],
-        day_min_json=payload["dayMin"],
-        week_runs_json=payload["weekRuns"],
-        week_min_json=payload["weekMin"],
-        conclusion_json=payload["conclusion"],
+        wf_options=options,
+        days_json=json.dumps(agg["days"]),
+        weeks_json=json.dumps(agg["weeks"]),
+        day_runs_json=datasets(agg["day_runs"]),
+        day_min_json=datasets(agg["day_min"]),
+        week_runs_json=datasets(agg["week_runs"]),
+        week_min_json=datasets(agg["week_min"]),
+        conclusion_json=json.dumps(agg["conclusions"]),
+        wf_conclusion_json=json.dumps(agg["wf_conclusions"]),
+        concl_colors_json=json.dumps(concl_colors),
+        wf_stats_json=json.dumps(wf_stats_js),
     )
 
 
@@ -513,6 +521,16 @@ _TEMPLATE = """<!DOCTYPE html>
     border:1px solid var(--border); border-radius:6px; padding:4px 10px;
     cursor:pointer; margin-right:6px; }}
   .toggle button.active {{ border-color:var(--accent); color:var(--accent); }}
+  .controls {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    margin-bottom:20px; }}
+  .controls label {{ color:var(--muted); font-size:.85rem; }}
+  .controls select {{ background:var(--card); color:var(--fg);
+    border:1px solid var(--border); border-radius:6px; padding:6px 10px;
+    font-size:.9rem; min-width:240px; max-width:100%; }}
+  .controls button {{ background:var(--card); color:var(--fg);
+    border:1px solid var(--border); border-radius:6px; padding:6px 10px;
+    cursor:pointer; font-size:.85rem; }}
+  #wfTable tbody tr.dim {{ opacity:.32; }}
 </style>
 </head>
 <body>
@@ -522,11 +540,16 @@ _TEMPLATE = """<!DOCTYPE html>
     &nbsp;·&nbsp; generated {generated}</div>
 </header>
 <main>
+  <div class="controls">
+    <label for="wfSelect">Workflow</label>
+    <select id="wfSelect" onchange="applyFilter(this.value)">{wf_options}</select>
+    <button onclick="document.getElementById('wfSelect').value='__all__';applyFilter('__all__')">Reset</button>
+  </div>
   <div class="cards">
-    <div class="stat"><div class="v">{total_runs}</div><div class="l">Runs</div></div>
-    <div class="stat"><div class="v">{total_minutes}</div><div class="l">Minutes</div></div>
-    <div class="stat"><div class="v">{total_hours}</div><div class="l">Hours</div></div>
-    <div class="stat"><div class="v">{n_workflows}</div><div class="l">Workflows</div></div>
+    <div class="stat"><div class="v" id="statRuns">{total_runs}</div><div class="l">Runs</div></div>
+    <div class="stat"><div class="v" id="statMin">{total_minutes}</div><div class="l">Minutes</div></div>
+    <div class="stat"><div class="v" id="statHours">{total_hours}</div><div class="l">Hours</div></div>
+    <div class="stat"><div class="v" id="statWf">{n_workflows}</div><div class="l">Workflows</div></div>
   </div>
 
   <div class="card">
@@ -573,13 +596,20 @@ const DAY_RUNS = {day_runs_json};
 const DAY_MIN = {day_min_json};
 const WEEK_RUNS = {week_runs_json};
 const WEEK_MIN = {week_min_json};
-const CONCL = {conclusion_json};
+const CONCL = {conclusion_json};            // global {{label: count}}
+const WF_CONCL = {wf_conclusion_json};      // {{wf: {{label: count}}}}
+const CONCL_COLORS = {concl_colors_json};   // {{label: color}}
+const WF_STATS = {wf_stats_json};           // {{wf: {{runs, minutes}}}}
 
-const stackOpts = (unit) => ({{
+const ALL = '__all__';
+const state = {{ wf: ALL, dayMetric: 'runs', weekMetric: 'runs' }};
+
+const stackOpts = (unit, stacked) => ({{
   responsive:true, maintainAspectRatio:false,
   interaction:{{ mode:'index', intersect:false }},
   plugins:{{
-    legend:{{ position:'bottom', labels:{{ boxWidth:12, font:{{size:11}} }} }},
+    legend:{{ display:stacked, position:'bottom',
+             labels:{{ boxWidth:12, font:{{size:11}} }} }},
     tooltip:{{ callbacks:{{ label:(c)=>`${{c.dataset.label}}: ${{Math.round(c.parsed.y)}} ${{unit}}` }} }}
   }},
   scales:{{ x:{{ stacked:true, ticks:{{ font:{{size:10}}, maxRotation:60 }} }},
@@ -587,38 +617,86 @@ const stackOpts = (unit) => ({{
                  title:{{ display:true, text:unit }} }} }}
 }});
 
-function cloneData(sets) {{ return sets.map(s => ({{...s, data:[...s.data]}})); }}
+// Datasets filtered to the selected workflow (or all of them).
+function seriesFor(sets) {{
+  const picked = state.wf === ALL ? sets : sets.filter(s => s.label === state.wf);
+  return picked.map(s => ({{...s, data:[...s.data]}}));
+}}
+
+function conclData() {{
+  const src = state.wf === ALL ? CONCL : (WF_CONCL[state.wf] || {{}});
+  const labels = Object.keys(src);
+  return {{
+    labels,
+    data: labels.map(k => src[k]),
+    colors: labels.map(k => CONCL_COLORS[k] || '#6e7781'),
+  }};
+}}
 
 const dayChart = new Chart(document.getElementById('dayChart'), {{
-  type:'bar', data:{{ labels:DAYS, datasets:cloneData(DAY_RUNS) }},
-  options:stackOpts('runs')
+  type:'bar', data:{{ labels:DAYS, datasets:seriesFor(DAY_RUNS) }},
+  options:stackOpts('runs', true)
 }});
 const weekChart = new Chart(document.getElementById('weekChart'), {{
-  type:'bar', data:{{ labels:WEEKS, datasets:cloneData(WEEK_RUNS) }},
-  options:stackOpts('runs')
+  type:'bar', data:{{ labels:WEEKS, datasets:seriesFor(WEEK_RUNS) }},
+  options:stackOpts('runs', true)
 }});
-new Chart(document.getElementById('conclChart'), {{
-  type:'doughnut',
-  data:{{ labels:CONCL.labels,
-         datasets:[{{ data:CONCL.data, backgroundColor:CONCL.colors }}] }},
+const conclChart = new Chart(document.getElementById('conclChart'), {{
+  type:'doughnut', data:{{ labels:[], datasets:[{{ data:[], backgroundColor:[] }}] }},
   options:{{ responsive:true, maintainAspectRatio:false,
             plugins:{{ legend:{{ position:'right', labels:{{ boxWidth:12, font:{{size:11}} }} }} }} }}
 }});
 
-function setDay(kind) {{
-  dayChart.data.datasets = cloneData(kind==='runs' ? DAY_RUNS : DAY_MIN);
-  dayChart.options = stackOpts(kind==='runs' ? 'runs' : 'minutes');
+function renderDay() {{
+  const runs = state.dayMetric === 'runs';
+  dayChart.data.datasets = seriesFor(runs ? DAY_RUNS : DAY_MIN);
+  dayChart.options = stackOpts(runs ? 'runs' : 'minutes', state.wf === ALL);
   dayChart.update();
-  document.getElementById('d-runs').classList.toggle('active', kind==='runs');
-  document.getElementById('d-min').classList.toggle('active', kind==='min');
+  document.getElementById('d-runs').classList.toggle('active', runs);
+  document.getElementById('d-min').classList.toggle('active', !runs);
 }}
-function setWeek(kind) {{
-  weekChart.data.datasets = cloneData(kind==='runs' ? WEEK_RUNS : WEEK_MIN);
-  weekChart.options = stackOpts(kind==='runs' ? 'runs' : 'minutes');
+function renderWeek() {{
+  const runs = state.weekMetric === 'runs';
+  weekChart.data.datasets = seriesFor(runs ? WEEK_RUNS : WEEK_MIN);
+  weekChart.options = stackOpts(runs ? 'runs' : 'minutes', state.wf === ALL);
   weekChart.update();
-  document.getElementById('w-runs').classList.toggle('active', kind==='runs');
-  document.getElementById('w-min').classList.toggle('active', kind==='min');
+  document.getElementById('w-runs').classList.toggle('active', runs);
+  document.getElementById('w-min').classList.toggle('active', !runs);
 }}
+function renderConcl() {{
+  const d = conclData();
+  conclChart.data.labels = d.labels;
+  conclChart.data.datasets[0].data = d.data;
+  conclChart.data.datasets[0].backgroundColor = d.colors;
+  conclChart.update();
+}}
+function renderStats() {{
+  let runs = 0, mins = 0, n = 0;
+  if (state.wf === ALL) {{
+    for (const k in WF_STATS) {{ runs += WF_STATS[k].runs; mins += WF_STATS[k].minutes; n++; }}
+  }} else if (WF_STATS[state.wf]) {{
+    runs = WF_STATS[state.wf].runs; mins = WF_STATS[state.wf].minutes; n = 1;
+  }}
+  document.getElementById('statRuns').textContent = runs.toLocaleString();
+  document.getElementById('statMin').textContent = Math.round(mins).toLocaleString();
+  document.getElementById('statHours').textContent = Math.round(mins/60).toLocaleString();
+  document.getElementById('statWf').textContent = n;
+}}
+function renderTable() {{
+  document.querySelectorAll('#wfTable tbody tr').forEach(tr => {{
+    tr.classList.toggle('dim',
+      state.wf !== ALL && tr.dataset.wf !== state.wf);
+  }});
+}}
+
+function applyFilter(wf) {{
+  state.wf = wf;
+  renderDay(); renderWeek(); renderConcl(); renderStats(); renderTable();
+}}
+function setDay(kind) {{ state.dayMetric = kind; renderDay(); }}
+function setWeek(kind) {{ state.weekMetric = kind; renderWeek(); }}
+
+renderConcl();  // initial doughnut
 
 // Click-to-sort for the per-workflow table.
 document.querySelectorAll('#wfTable th').forEach((th, i) => {{
