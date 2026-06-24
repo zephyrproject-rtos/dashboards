@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Actions Usage
+
+on:
+  schedule:
+    - cron: '0 5 * * *' # Every day at 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Look back this many days'
+        required: false
+        default: '90'
+      workflow:
+        description: 'Workflow file basename to focus on (blank = all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actions-usage:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'zephyrproject-rtos'
+
+    steps:
+      - name: Checkout Dashboard scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --user requests awscli==1.45.11
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore cache and history from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_ROOT="dashboards/actions-usage"
+
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/actions_usage_cache.json" \
+            actions_usage_cache.json || echo "No cache found in S3, starting fresh."
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/actions_usage_history.json" \
+            actions_usage_history.json || echo "No history found in S3, starting fresh."
+
+      - name: Pull Actions usage
+        env:
+          # secrets.GITHUB_TOKEN is sufficient to read a public repository's
+          # workflow-run data. Swap in a PAT secret here if you ever target a
+          # private repository.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WORKFLOW_ARG=""
+          if [ -n "${{ inputs.workflow }}" ]; then
+            WORKFLOW_ARG="--workflow ${{ inputs.workflow }}"
+          fi
+          python3 scripts/actions_usage.py \
+            --repo zephyrproject-rtos/zephyr \
+            --since "${{ inputs.since || '90' }}" \
+            ${WORKFLOW_ARG} \
+            --output actions_usage.html \
+            --cache actions_usage_cache.json \
+            --history actions_usage_history.json \
+            --verbose
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: actions-usage-report
+          path: actions_usage.html
+
+      - name: Upload history
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: actions-usage-history
+          path: actions_usage_history.json
+          if-no-files-found: ignore
+
+      - name: Upload cache
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: actions-usage-cache
+          path: actions_usage_cache.json
+          if-no-files-found: ignore
+
+      - name: Publish to AWS S3
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/actions-usage"
+
+          aws s3 cp actions_usage.html \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          aws s3 cp actions_usage_history.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/actions_usage_history.json" || true
+          aws s3 cp actions_usage_cache.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/actions_usage_cache.json" || true
+          echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
+            >> "${GITHUB_STEP_SUMMARY}"

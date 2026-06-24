@@ -1,3 +1,4 @@
 PyGithub
 PyYAML
+requests
 awscli==1.45.11
