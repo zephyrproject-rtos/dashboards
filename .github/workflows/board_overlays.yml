@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Board Overlay Analysis
+
+on:
+  schedule:
+    - cron: '30 5 * * *'  # Every day at 05:30 UTC
+  workflow_dispatch:
+    inputs:
+      near_dup_threshold:
+        description: 'Jaccard similarity threshold for near-duplicate detection'
+        required: false
+        default: '0.85'
+      no_near_dup:
+        description: 'Skip near-duplicate detection'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  board-overlays:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'zephyrproject-rtos'
+
+    steps:
+      - name: Checkout Zephyr
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: zephyrproject-rtos/zephyr
+          path: zephyr
+          fetch-depth: 1
+
+      - name: Checkout Dashboard scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: dashboards
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --user awscli==1.45.11
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run board overlay analysis
+        run: |
+          ARGS=(
+            --zephyr-root "$GITHUB_WORKSPACE/zephyr"
+            --output "$GITHUB_WORKSPACE/board_overlay_analysis.html"
+            --near-dup-threshold "${{ inputs.near_dup_threshold || '0.85' }}"
+          )
+          if [[ "${{ inputs.no_near_dup }}" == "true" ]]; then
+            ARGS+=(--no-near-dup)
+          fi
+          python3 dashboards/scripts/analyze_board_overlays.py "${ARGS[@]}"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: board-overlay-report
+          path: board_overlay_analysis.html
+          if-no-files-found: ignore
+
+      - name: Publish to AWS S3
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/board-overlays"
+
+          aws s3 cp "$GITHUB_WORKSPACE/board_overlay_analysis.html" \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
+            >> "${GITHUB_STEP_SUMMARY}"
