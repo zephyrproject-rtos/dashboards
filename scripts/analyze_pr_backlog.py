@@ -1251,11 +1251,11 @@ _HTML_TEMPLATE = """\
   {author_chart}
 </div>
 
-<!-- ======================== TREND HISTORY ======================== -->
-{trend_section}
-
 <!-- ======================== HISTORY CHART ======================== -->
 {history_chart_section}
+
+<!-- ======================== TREND HISTORY ======================== -->
+{trend_section}
 
 </main>
 <script>
@@ -1567,13 +1567,14 @@ def _delta_html(current, prev, lower_is_better=True):
     return f'<span class="delta {cls}">{arrow} {label}</span>'
 
 
-def _trend_table_html(history):
-    """Render an HTML table summarising all historical run snapshots.
+def _trend_table_html(history, limit=10):
+    """Render an HTML table summarising the most recent run snapshots.
 
-    *history* is a list of snapshot dicts, oldest first.  The table is
-    displayed newest-first with per-cell deltas vs. the previous run.
-    Returns an empty-state paragraph when there is only one entry (nothing
-    to compare yet) or no data.
+    *history* is a list of snapshot dicts, oldest first.  Only the last
+    *limit* entries are shown, newest first, with per-cell deltas vs. the
+    previous run (computed from the full history, so the oldest displayed
+    row still gets a delta).  Returns an empty-state paragraph when there
+    is only one entry (nothing to compare yet) or no data.
     """
     if len(history) < 2:
         return (
@@ -1598,7 +1599,8 @@ def _trend_table_html(history):
     header = "".join(f"<th>{c[0]}</th>" for c in cols)
 
     rows = []
-    for i in range(len(history) - 1, -1, -1):
+    first = max(0, len(history) - limit) if limit else 0
+    for i in range(len(history) - 1, first - 1, -1):
         snap = history[i]
         prev = history[i - 1] if i > 0 else None
         cells = []
@@ -2192,8 +2194,8 @@ def render_html(org, repo, age_days, pr_data_list, generated, history=None):
         trend_section = (
             '<div class="section-title">Backlog Trend History</div>\n'
             '<p style="font-size:.8rem;color:var(--muted);margin-bottom:8px;">'
-            'Each row is one saved run.  Arrows show change vs. the '
-            'previous run; green = improving, red = worsening.</p>\n'
+            'Each row is one saved run (10 most recent).  Arrows show change '
+            'vs. the previous run; green = improving, red = worsening.</p>\n'
             + _trend_table_html(all_runs)
         )
     else:

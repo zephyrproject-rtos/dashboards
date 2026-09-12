@@ -593,11 +593,11 @@ _HTML_TEMPLATE = """\
 <div class="section-title">Bugs by Milestone</div>
 {milestone_table}
 
-<!-- ======================== TREND HISTORY ======================== -->
-{trend_section}
-
 <!-- ======================== HISTORY CHART ======================== -->
 {history_chart_section}
+
+<!-- ======================== TREND HISTORY ======================== -->
+{trend_section}
 
 </main>
 <script>
@@ -1025,7 +1025,12 @@ def _area_priority_heatmap_html(issues, top_n=20):
     )
 
 
-def _trend_table_html(history):
+def _trend_table_html(history, limit=10):
+    """Render the last *limit* run snapshots, newest first.
+
+    Deltas are computed against the full *history*, so the oldest displayed
+    row still shows a change vs. the run before it.
+    """
     if len(history) < 2:
         return (
             '<p style="color:var(--muted);font-size:.85rem;margin-top:8px;">'
@@ -1047,7 +1052,8 @@ def _trend_table_html(history):
     ]
     header = "".join(f"<th>{c[0]}</th>" for c in cols)
     rows = []
-    for i in range(len(history) - 1, -1, -1):
+    first = max(0, len(history) - limit) if limit else 0
+    for i in range(len(history) - 1, first - 1, -1):
         snap = history[i]
         prev = history[i - 1] if i > 0 else None
         cells = []
@@ -1402,8 +1408,8 @@ def render_html(org, repo, issues, generated, history=None):
         trend_section = (
             '<div class="section-title">Bug Backlog Trend History</div>\n'
             '<p style="font-size:.8rem;color:var(--muted);margin-bottom:8px;">'
-            'Each row is one saved run.  Arrows show change vs. the previous run; '
-            'green = improving, red = worsening.</p>\n'
+            'Each row is one saved run (10 most recent).  Arrows show change vs. '
+            'the previous run; green = improving, red = worsening.</p>\n'
             + _trend_table_html(all_runs)
         )
     else:
