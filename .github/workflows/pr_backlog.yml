@@ -12,7 +12,7 @@ on:
       max_prs:
         description: 'Maximum number of PRs to analyse'
         required: false
-        default: '600'
+        default: '800'
       exclude_drafts:
         description: 'Exclude draft PRs'
         required: false
