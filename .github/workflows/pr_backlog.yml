@@ -81,7 +81,7 @@ jobs:
             --history pr_backlog_history.json
             --cache pr_backlog_cache.json
             --age "${{ inputs.age || '30' }}"
-            --max-prs "${{ inputs.max_prs || '600' }}"
+            --max-prs "${{ inputs.max_prs || '800' }}"
             --exclude-drafts
             --verbose
           )
