@@ -12,6 +12,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 
 # All known testsuite/testcase statuses (from TwisterStatus enum)
 _SUITE_STATUSES = ['passed', 'failed', 'error', 'skipped', 'filtered', 'not run']
@@ -57,8 +58,14 @@ _STATUS_DESC = {
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_files(patterns: list[str]) -> tuple[dict | None, list[dict]]:
-    """Return (environment, testsuites) merged from all matching files."""
+def load_files(patterns: list[str]) -> tuple[dict | None, list[dict], dict]:
+    """Return (environment, testsuites, runners) merged from all matching files.
+
+    Each input file is one parallel CI runner's share of the run, identified
+    by twister's ``--subset`` option.  Every suite is tagged with its runner
+    so the report can compare them; *runners* maps that label to the file and
+    the twister options it ran with.
+    """
     input_files: list[str] = []
     for pattern in patterns:
         matched = sorted(glob.glob(pattern, recursive=True))
@@ -70,6 +77,7 @@ def load_files(patterns: list[str]) -> tuple[dict | None, list[dict]]:
 
     environment: dict | None = None
     testsuites: list[dict] = []
+    runners: dict[str, dict] = {}
 
     for path in input_files:
         try:
@@ -78,11 +86,35 @@ def load_files(patterns: list[str]) -> tuple[dict | None, list[dict]]:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"Error reading {path}: {exc}", file=sys.stderr)
             sys.exit(1)
+        env = data.get('environment', {})
         if environment is None:
-            environment = data.get('environment', {})
-        testsuites.extend(data.get('testsuites', []))
+            environment = env
+        options = env.get('options') or {}
+        label = _runner_label(options.get('subset'), path, runners)
+        runners[label] = {
+            'label':   label,
+            'file':    path,
+            'subset':  options.get('subset', ''),
+            'jobs':    options.get('jobs') or 0,
+            'run_date': env.get('run_date', ''),
+        }
+        suites = data.get('testsuites', [])
+        for suite in suites:
+            suite['_runner'] = label
+        testsuites.extend(suites)
 
-    return environment, testsuites
+    return environment, testsuites, runners
+
+
+def _runner_label(subset: str | None, path: str, seen: dict) -> str:
+    """Name a runner after its twister subset, falling back to the file name."""
+    if subset:
+        label = f'Subset {subset}'
+    else:
+        label = Path(path).parent.name or Path(path).name
+    if label in seen:  # two files claiming the same subset
+        label = f'{label} ({Path(path).name})'
+    return label
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +233,185 @@ def failed_suites(testsuites: list[dict]) -> list[dict]:
     ]
 
 
+def _seconds(value) -> float:
+    """Return *value* as a positive number of seconds, or 0.0."""
+    try:
+        secs = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return secs if secs > 0 else 0.0
+
+
+def _summarise(values: list[float]) -> dict:
+    """Return count/total/mean/median/p95/max over *values*."""
+    if not values:
+        return {'count': 0, 'total': 0.0, 'mean': 0.0,
+                'median': 0.0, 'p95': 0.0, 'max': 0.0}
+    ordered = sorted(values)
+    p95_idx = min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1))))
+    return {
+        'count':  len(ordered),
+        'total':  sum(ordered),
+        'mean':   sum(ordered) / len(ordered),
+        'median': median(ordered),
+        'p95':    ordered[p95_idx],
+        'max':    ordered[-1],
+    }
+
+
+def build_times(suites: list[dict]) -> list[float]:
+    """Build durations of *suites* that actually recorded one."""
+    return [t for t in (_seconds(s.get('build_time')) for s in suites) if t]
+
+
+def exec_times(suites: list[dict]) -> list[float]:
+    """Execution durations of *suites* that actually ran on a target.
+
+    Build-only suites carry an execution_time of 0, and non-runnable ones
+    never execute at all; both would drag every average towards zero.
+    """
+    return [t for t in (_seconds(s.get('execution_time'))
+                        for s in suites if s.get('runnable')) if t]
+
+
+def timing_stats(testsuites: list[dict], key: str) -> list[dict]:
+    """Aggregate build/execution timing grouped by the *key* suite field.
+
+    Used with ``name`` for per-test statistics and ``platform`` for
+    per-board ones.  Rows are sorted by total build time descending, so the
+    most expensive group to build comes first.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for ts in testsuites:
+        groups[ts.get(key) or 'unknown'].append(ts)
+
+    rows = []
+    for name, suites in groups.items():
+        builds = build_times(suites)
+        execs = exec_times(suites)
+        rows.append({
+            'key':       name,
+            'arch':      suites[0].get('arch', ''),
+            'platform':  suites[0].get('platform', ''),
+            'instances': len(suites),
+            'build':     _summarise(builds),
+            'exec':      _summarise(execs),
+        })
+    rows.sort(key=lambda r: (-r['build']['total'], -r['instances'], r['key']))
+    return rows
+
+
+def slowest_suites(testsuites: list[dict], field: str, limit: int,
+                   runnable_only: bool = False) -> list[tuple[float, dict]]:
+    """Return the *limit* slowest suites by *field*, slowest first."""
+    items = []
+    for ts in testsuites:
+        if runnable_only and not ts.get('runnable'):
+            continue
+        secs = _seconds(ts.get(field))
+        if secs:
+            items.append((secs, ts))
+    items.sort(key=lambda item: -item[0])
+    return items[:limit]
+
+
+def suite_time(ts: dict) -> float:
+    """Total machine time a suite cost: build plus execution."""
+    secs = _seconds(ts.get('build_time'))
+    if ts.get('runnable'):
+        secs += _seconds(ts.get('execution_time'))
+    return secs
+
+
+def test_area(ts: dict) -> str:
+    """Coarse grouping of a suite by its path, e.g. ``tests/bluetooth``."""
+    parts = (ts.get('path') or '').split('/')
+    return '/'.join(parts[:2]) if len(parts) >= 2 else (parts[0] or 'unknown')
+
+
+def runner_stats(testsuites: list[dict], runners: dict) -> list[dict]:
+    """Per-runner (per twister subset) workload, sorted by total time.
+
+    Build and execution times are machine time.  Twister runs ``jobs`` builds
+    in parallel inside one runner, so the wall-clock estimate divides by that.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for ts in testsuites:
+        groups[ts.get('_runner', 'unknown')].append(ts)
+
+    grand_total = sum(suite_time(ts) for ts in testsuites)
+    rows = []
+    for label, suites in groups.items():
+        meta = runners.get(label, {})
+        build = sum(build_times(suites))
+        run = sum(exec_times(suites))
+        total = build + run
+        jobs = meta.get('jobs') or 0
+        ran, not_run = run_notrun_counts(suites)
+        sc = status_counts(suites, _SUITE_STATUSES)
+        slowest = max(suites, key=suite_time, default=None)
+        platform_time: dict[str, float] = defaultdict(float)
+        for ts in suites:
+            platform_time[ts.get('platform', 'unknown')] += suite_time(ts)
+        top_platform = max(platform_time.items(), key=lambda kv: kv[1],
+                           default=('', 0.0))
+        rows.append({
+            'runner':       label,
+            'subset':       meta.get('subset', ''),
+            'jobs':         jobs,
+            'suites':       len(suites),
+            'ran':          ran,
+            'not_run':      not_run,
+            'failures':     sc.get('failed', 0) + sc.get('error', 0),
+            'build':        build,
+            'exec':         run,
+            'total':        total,
+            'est_wall':     total / jobs if jobs else 0.0,
+            'share':        100.0 * total / grand_total if grand_total else 0.0,
+            'slowest_test': slowest.get('name', '') if slowest else '',
+            'slowest_time': suite_time(slowest) if slowest else 0.0,
+            'top_platform': top_platform[0],
+            'top_platform_time': top_platform[1],
+        })
+    rows.sort(key=lambda r: -r['total'])
+    return rows
+
+
+def hotspots(testsuites: list[dict], key) -> list[dict]:
+    """Rank *testsuites* by total machine time under the *key* grouping.
+
+    Rows carry a running cumulative share so it is obvious how few entries
+    account for most of the run.
+    """
+    totals: dict[str, float] = defaultdict(float)
+    builds: dict[str, float] = defaultdict(float)
+    execs: dict[str, float] = defaultdict(float)
+    counts: dict[str, int] = defaultdict(int)
+    for ts in testsuites:
+        name = key(ts)
+        totals[name] += suite_time(ts)
+        builds[name] += _seconds(ts.get('build_time'))
+        if ts.get('runnable'):
+            execs[name] += _seconds(ts.get('execution_time'))
+        counts[name] += 1
+
+    grand_total = sum(totals.values())
+    rows = []
+    running = 0.0
+    for name, total in sorted(totals.items(), key=lambda kv: -kv[1]):
+        running += total
+        rows.append({
+            'key':        name,
+            'instances':  counts[name],
+            'build':      builds[name],
+            'exec':       execs[name],
+            'total':      total,
+            'share':      100.0 * total / grand_total if grand_total else 0.0,
+            'cumulative': 100.0 * running / grand_total if grand_total else 0.0,
+        })
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # HTML generation helpers
 # ---------------------------------------------------------------------------
@@ -232,6 +443,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
      font-size:14px;color:var(--text);background:var(--bg);padding:24px}
 h1{font-size:1.6em;margin-bottom:4px}
 h2{font-size:1.15em;margin:28px 0 10px;border-bottom:1px solid var(--border);padding-bottom:6px}
+h3{font-size:1em;margin:22px 0 8px;color:#57606a}
 .meta{color:#57606a;font-size:0.85em;margin-bottom:20px}
 .cards{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:28px}
 .card{background:#fff;border:1px solid var(--border);border-radius:8px;
@@ -422,6 +634,9 @@ def _html_top(title: str, env: dict | None, total_suites: int,
   <a href="#arch">By Arch</a>
   <a href="#toolchain">By Toolchain</a>
   <a href="#boards">By Board</a>
+  <a href="#timing">Timing</a>
+  <a href="#hotspots">Time Hotspots</a>
+  <a href="#runners">Runners</a>
   <a href="#failures">Failures</a>
 </nav>
 <h1 id="summary">{title}</h1>
@@ -704,6 +919,278 @@ def _board_table(rows: list[dict]) -> str:
     frow = _filter_row(10)
     return (f'<h2 id="boards">Results by Board / Platform ({len(rows)} boards)</h2>'
             f'<table class="filterable"><thead>{thead}{frow}</thead><tbody>{body}</tbody></table>')
+
+
+def _fmt_secs(secs: float) -> str:
+    """Seconds with one decimal; the sort/filter JS reads this as a number."""
+    return f'{secs:,.1f}'
+
+
+def _fmt_clock(secs: float) -> str:
+    """Human-readable duration, used for cell tooltips."""
+    secs = int(secs or 0)
+    if secs <= 0:
+        return '0s'
+    h, rem = divmod(secs, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f'{h}h {m:02d}m'
+    if m:
+        return f'{m}m {sec:02d}s'
+    return f'{sec}s'
+
+
+def _secs_cell(secs: float, subtle: bool = False) -> str:
+    cls = ' class="subtle"' if subtle else ''
+    return f'<td{cls} title="{_fmt_clock(secs)}">{_fmt_secs(secs)}</td>'
+
+
+def _status_chip(status: str) -> str:
+    """A status badge showing the status name rather than a count."""
+    icon, bg, fg = _STATUS_BADGE.get(status, ('?', '#6e7781', '#fff'))
+    return (f'<span class="badge" style="background:{bg};color:{fg}">'
+            f'{icon} {status}</span>')
+
+
+def _timing_overview(testsuites: list[dict]) -> str:
+    """Whole-run build vs. execution time summary."""
+    build = _summarise(build_times(testsuites))
+    run = _summarise(exec_times(testsuites))
+    thead = ('<tr><th>Phase</th><th>Samples</th><th>Total (s)</th>'
+             '<th>Mean (s)</th><th>Median (s)</th><th>p95 (s)</th>'
+             '<th>Max (s)</th></tr>')
+    body = ''
+    for label, stat, note in (
+            ('Build', build, 'suites with a recorded build time'),
+            ('Execution', run, 'runnable suites that actually executed')):
+        body += (
+            f'<tr><td><strong>{label}</strong> '
+            f'<span class="subtle">({note})</span></td>'
+            f'<td>{stat["count"]}</td>'
+            + _secs_cell(stat['total'])
+            + _secs_cell(stat['mean'])
+            + _secs_cell(stat['median'])
+            + _secs_cell(stat['p95'])
+            + _secs_cell(stat['max'])
+            + '</tr>'
+        )
+    return f'<table><thead>{thead}</thead><tbody>{body}</tbody></table>'
+
+
+def _timing_group_table(rows: list[dict], label: str, limit: int,
+                        with_arch: bool = False) -> str:
+    """Render per-test or per-platform timing rows."""
+    cols = [label, 'Instances', 'Builds', 'Build total (s)', 'Build mean (s)',
+            'Build median (s)', 'Build max (s)', 'Runs', 'Exec total (s)',
+            'Exec mean (s)', 'Exec max (s)']
+    if with_arch:
+        cols.insert(1, 'Arch')
+    thead = '<tr>' + ''.join(f'<th>{c}</th>' for c in cols) + '</tr>'
+
+    body = ''
+    for r in rows[:limit]:
+        b, e = r['build'], r['exec']
+        body += (
+            f'<tr><td><code>{r["key"]}</code></td>'
+            + (f'<td>{r["arch"]}</td>' if with_arch else '')
+            + f'<td>{r["instances"]}</td>'
+            + f'<td>{b["count"]}</td>'
+            + _secs_cell(b['total'])
+            + _secs_cell(b['mean'])
+            + _secs_cell(b['median'])
+            + _secs_cell(b['max'])
+            + f'<td class="subtle">{e["count"]}</td>'
+            + _secs_cell(e['total'], subtle=True)
+            + _secs_cell(e['mean'], subtle=True)
+            + _secs_cell(e['max'], subtle=True)
+            + '</tr>'
+        )
+    frow = _filter_row(len(cols))
+    note = ''
+    if len(rows) > limit:
+        note = (f'<p class="subtle">Showing the {limit} slowest of '
+                f'{len(rows)} — raise --timing-rows for the rest.</p>')
+    return (f'<table class="filterable"><thead>{thead}{frow}</thead>'
+            f'<tbody>{body}</tbody></table>{note}')
+
+
+def _slowest_table(items: list[tuple[float, dict]], heading: str,
+                   column: str) -> str:
+    if not items:
+        return (f'<h3>{heading}</h3>'
+                f'<p class="subtle">No suite recorded a time for this phase.</p>')
+    thead = (f'<tr><th>Test</th><th>Platform</th><th>Status</th>'
+             f'<th>{column}</th></tr>')
+    body = ''
+    for secs, ts in items:
+        body += (
+            f'<tr><td><code>{ts.get("name", "")}</code></td>'
+            f'<td><code>{ts.get("platform", "")}</code></td>'
+            f'<td>{_status_chip(ts.get("status", "not run"))}</td>'
+            + _secs_cell(secs)
+            + '</tr>'
+        )
+    return (f'<h3>{heading}</h3>'
+            f'<table><thead>{thead}</thead><tbody>{body}</tbody></table>')
+
+
+def _share_bar(pct: float, color: str = '#0969da') -> str:
+    return (f'<div class="bar-wrap" title="{pct:.1f}%">'
+            f'<div class="bar" style="width:{max(pct, 0.5):.1f}%;background:{color}"></div>'
+            f'<span class="bar-label">{pct:.1f}%</span></div>')
+
+
+def _hotspot_table(rows: list[dict], label: str, limit: int) -> str:
+    """Rank groups by machine time, with a running cumulative share."""
+    cols = [label, 'Instances', 'Build (s)', 'Exec (s)', 'Total (s)',
+            'Share of run', 'Cumulative']
+    thead = '<tr>' + ''.join(f'<th>{c}</th>' for c in cols) + '</tr>'
+    body = ''
+    for r in rows[:limit]:
+        body += (
+            f'<tr><td><code>{r["key"]}</code></td>'
+            f'<td>{r["instances"]}</td>'
+            + _secs_cell(r['build'])
+            + _secs_cell(r['exec'], subtle=True)
+            + _secs_cell(r['total'])
+            + f'<td>{_share_bar(r["share"])}</td>'
+            + f'<td class="subtle">{r["cumulative"]:.1f}%</td></tr>'
+        )
+    frow = _filter_row(len(cols))
+    note = ''
+    if len(rows) > limit:
+        note = (f'<p class="subtle">Showing the top {limit} of {len(rows)}; '
+                f'cumulative share is over all of them.</p>')
+    return (f'<table class="filterable"><thead>{thead}{frow}</thead>'
+            f'<tbody>{body}</tbody></table>{note}')
+
+
+def _runner_table(rows: list[dict]) -> str:
+    """Compare the parallel CI runners that produced the input files."""
+    if len(rows) < 2:
+        return ('<h2 id="runners">Runner Comparison</h2>'
+                '<p class="subtle">Only one result file was loaded, so there '
+                'is nothing to compare. Pass every subset\'s twister.json to '
+                'see how the parallel CI runners divided the work.</p>')
+
+    totals = [r['total'] for r in rows]
+    walls = [r['est_wall'] for r in rows if r['est_wall']]
+    slowest, fastest = rows[0], rows[-1]
+    spread = (slowest['total'] / fastest['total']) if fastest['total'] else 0.0
+    mean_total = sum(totals) / len(totals)
+    imbalance = (100.0 * (slowest['total'] - mean_total) / mean_total
+                 if mean_total else 0.0)
+
+    summary = (
+        f'<p class="subtle">{len(rows)} runners, '
+        f'{_fmt_clock(sum(totals))} of machine time in total. '
+        f'The busiest runner (<code>{slowest["runner"]}</code>, '
+        f'{_fmt_clock(slowest["total"])}) carries {imbalance:.0f}% more than '
+        f'the average and {spread:.1f}x the lightest '
+        f'(<code>{fastest["runner"]}</code>, {_fmt_clock(fastest["total"])}). '
+        f'A run finishes no sooner than its slowest runner, so that gap is '
+        f'wasted wall time.'
+        + (f' Estimated wall time of the busiest runner: '
+           f'{_fmt_clock(max(walls))}.' if walls else '')
+        + '</p>'
+    )
+
+    cols = ['Runner', 'Parallel jobs', 'Suites', 'Ran', 'Not run', 'Failures',
+            'Build (s)', 'Exec (s)', 'Total (s)', 'Est. wall (s)',
+            'Share of run', 'Heaviest test', 'Heaviest platform']
+    thead = '<tr>' + ''.join(f'<th>{c}</th>' for c in cols) + '</tr>'
+    body = ''
+    for r in rows:
+        body += (
+            f'<tr><td><strong>{r["runner"]}</strong></td>'
+            f'<td class="subtle">{r["jobs"] or "&ndash;"}</td>'
+            f'<td>{r["suites"]}</td>'
+            f'<td>{r["ran"]}</td>'
+            f'<td class="subtle">{r["not_run"]}</td>'
+            f'<td>{r["failures"]}</td>'
+            + _secs_cell(r['build'])
+            + _secs_cell(r['exec'], subtle=True)
+            + _secs_cell(r['total'])
+            + _secs_cell(r['est_wall'], subtle=True)
+            + f'<td>{_share_bar(r["share"])}</td>'
+            + f'<td><code>{r["slowest_test"]}</code> '
+              f'<span class="subtle">({_fmt_secs(r["slowest_time"])}s)</span></td>'
+            + f'<td><code>{r["top_platform"]}</code> '
+              f'<span class="subtle">({_fmt_secs(r["top_platform_time"])}s)</span></td>'
+            + '</tr>'
+        )
+    frow = _filter_row(len(cols))
+    return ('<h2 id="runners">Runner Comparison</h2>'
+            + summary
+            + f'<table class="filterable"><thead>{thead}{frow}</thead>'
+              f'<tbody>{body}</tbody></table>')
+
+
+def _hotspots_html(testsuites: list[dict], limit: int) -> str:
+    """Where the run's machine time actually goes."""
+    by_test = hotspots(testsuites, lambda ts: ts.get('name', 'unknown'))
+    by_platform = hotspots(testsuites, lambda ts: ts.get('platform', 'unknown'))
+    by_area = hotspots(testsuites, test_area)
+    total = sum(r['total'] for r in by_test)
+    return (
+        '<h2 id="hotspots">Where the Time Goes</h2>'
+        f'<p class="subtle">{_fmt_clock(total)} of machine time across '
+        f'{len(testsuites)} suites, split by test, by platform and by test '
+        'area. "Total" is build time plus execution time; the cumulative '
+        'column shows how few entries dominate the run.</p>'
+        + '<h3>Test areas</h3>'
+        + _hotspot_table(by_area, 'Test area', limit)
+        + '<h3>Tests</h3>'
+        + _hotspot_headline_html(by_test, 'tests')
+        + _hotspot_table(by_test, 'Test', limit)
+        + '<h3>Platforms</h3>'
+        + _hotspot_headline_html(by_platform, 'platforms')
+        + _hotspot_table(by_platform, 'Board / Platform', limit)
+    )
+
+
+def _hotspot_headline_html(rows: list[dict], noun: str) -> str:
+    """State how concentrated the time is, e.g. '12 of 900 tests = 50%'."""
+    if not rows:
+        return ''
+    marks = {}
+    for cut in (50.0, 80.0):
+        for i, r in enumerate(rows, 1):
+            if r['cumulative'] >= cut:
+                marks[cut] = f'{i} of {len(rows)} {noun} ({100.0 * i / len(rows):.1f}%)'
+                break
+    if not marks:
+        return ''
+    parts = [f'{marks[cut]} account for {cut:.0f}% of the machine time'
+             for cut in sorted(marks)]
+    return f'<p class="subtle">{"; ".join(parts)}.</p>'
+
+
+def _timing_html(testsuites: list[dict], limit: int, top: int = 25) -> str:
+    """Build- and execution-time statistics per test and per platform."""
+    per_test = timing_stats(testsuites, 'name')
+    per_platform = timing_stats(testsuites, 'platform')
+    return (
+        '<h2 id="timing">Build &amp; Execution Time</h2>'
+        '<p class="subtle">All values are seconds; hover a cell for a '
+        'human-readable duration. Build times cover every suite that was '
+        'compiled, execution times only suites that are runnable and actually '
+        'ran, so build-only results do not drag the averages down. Tables are '
+        'sortable and filterable, and start with the most expensive group.</p>'
+        + _timing_overview(testsuites)
+        + '<h3>Per test suite</h3>'
+        + _timing_group_table(per_test, 'Test', limit)
+        + '<h3>Per board / platform</h3>'
+        + _timing_group_table(per_platform, 'Board / Platform', limit,
+                              with_arch=True)
+        + _slowest_table(slowest_suites(testsuites, 'build_time', top),
+                         f'Slowest individual builds (top {top})',
+                         'Build time (s)')
+        + _slowest_table(slowest_suites(testsuites, 'execution_time', top,
+                                        runnable_only=True),
+                         f'Slowest individual executions (top {top})',
+                         'Exec time (s)')
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1362,13 +1849,19 @@ def parse_args() -> argparse.Namespace:
         default='Twister Test Run Summary',
         help='Report title',
     )
+    parser.add_argument(
+        '--timing-rows',
+        type=int,
+        default=300,
+        help='Rows to show in each timing table (default: 300)',
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    env, testsuites = load_files(args.inputs)
+    env, testsuites, runners = load_files(args.inputs)
 
     all_tc = [tc for ts in testsuites for tc in ts.get('testcases', [])]
     suite_counts = status_counts(testsuites, _SUITE_STATUSES)
@@ -1395,6 +1888,9 @@ def main() -> int:
     html += _arch_table(arch_stats(testsuites))
     html += _toolchain_table(toolchain_stats(testsuites))
     html += _board_table(board_stats(testsuites))
+    html += _timing_html(testsuites, args.timing_rows)
+    html += _hotspots_html(testsuites, args.timing_rows)
+    html += _runner_table(runner_stats(testsuites, runners))
     html += _failed_table(failed_suites(testsuites))
     html += _FILTER_JS
     html += '\n</body>\n</html>\n'
