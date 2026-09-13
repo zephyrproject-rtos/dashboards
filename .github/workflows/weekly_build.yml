@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Weekly Build Dashboard
+
+on:
+  schedule:
+    - cron: '0 18 * * 0'  # Sundays, after the weekly twister run has finished
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'twister.yaml run ID in zephyrproject-rtos/zephyr (empty = latest scheduled run)'
+        required: false
+        default: ''
+      title:
+        description: 'Report title'
+        required: false
+        default: 'Zephyr Weekly Build CI Dashboard'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  weekly-build-dashboard:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'zephyrproject-rtos'
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Dashboard scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore history from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_ROOT="dashboards/weekly-build"
+
+          aws s3 cp "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/weekly_build_history.json" \
+            weekly_build_history.json || echo "No history found in S3, starting fresh."
+
+      - name: Generate weekly build dashboard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/weekly_build_report.py \
+            --output weekly_build.html \
+            --json weekly_build_snapshot.json \
+            --history weekly_build_history.json \
+            --title "${{ inputs.title || 'Zephyr Weekly Build CI Dashboard' }}" \
+            ${{ inputs.run_id && format('--run-id {0}', inputs.run_id) || '' }} \
+            --jobs 8 \
+            --verbose
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weekly-build-report
+          path: |
+            weekly_build.html
+            weekly_build_snapshot.json
+          if-no-files-found: ignore
+
+      - name: Upload history
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weekly-build-history
+          path: weekly_build_history.json
+          if-no-files-found: ignore
+
+      - name: Publish to AWS S3
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_TESTING_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_TESTING_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          PUBLISH_BUCKET="testing.zephyrproject.org"
+          PUBLISH_DOMAIN="testing.zephyrproject.io"
+          PUBLISH_ROOT="dashboards/weekly-build"
+
+          aws s3 cp weekly_build.html \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/index.html"
+          aws s3 cp weekly_build_history.json \
+            "s3://${PUBLISH_BUCKET}/${PUBLISH_ROOT}/weekly_build_history.json" || true
+          echo "Report available at: https://${PUBLISH_DOMAIN}/${PUBLISH_ROOT}/index.html" \
+            >> "${GITHUB_STEP_SUMMARY}"
