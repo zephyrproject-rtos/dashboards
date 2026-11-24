@@ -139,7 +139,17 @@ class GitHub:
         url = path if path.startswith("http") else f"{API_ROOT}{path}"
         delay = 2.0
         for attempt in range(retries):
-            resp = self.session.get(url, headers=self.headers, params=params, timeout=60)
+            try:
+                resp = self.session.get(url, headers=self.headers, params=params,
+                                        timeout=60)
+            except requests.RequestException as exc:
+                # Dropped/truncated responses happen on large payloads.
+                if attempt == retries - 1:
+                    raise RuntimeError(f"GitHub API request failed for {url}: {exc}") from exc
+                log(f"Request error ({exc}), retrying in {delay:.0f}s", self.verbose)
+                time.sleep(delay)
+                delay *= 2
+                continue
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code in (403, 429) and "rate limit" in resp.text.lower():
@@ -226,8 +236,10 @@ def find_run(gh: GitHub, repo: str, workflow: str, event: str, branch: str | Non
 def fetch_jobs(gh: GitHub, repo: str, run_id: int, verbose: bool = False) -> list[dict]:
     log(f"Fetching jobs for run {run_id}", verbose)
     try:
+        # Job objects embed every step, so 100 per page makes responses large
+        # enough for GitHub to answer 502 or cut the body short. Keep pages small.
         return gh.paged(f"/repos/{repo}/actions/runs/{run_id}/jobs", "jobs",
-                        {"filter": "latest"})
+                        {"filter": "latest", "per_page": 30})
     except RuntimeError as exc:
         log(f"WARNING: could not fetch jobs: {exc}", True)
         return []
